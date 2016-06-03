@@ -30,7 +30,7 @@ pub const S_KC: usize = 256;
 /// Ai is packed into A~.
 ///
 /// Size of A~ is KC x MC
-pub const S_MC: usize = 64;
+pub const S_MC: usize = 128;
 
 /// Columns in C, B that we handle at a time. (5th loop)
 /// 

@@ -46,7 +46,7 @@ pub trait GemmKernel {
         alpha: Self::Elem,
         a: *const Self::Elem,
         b: *const Self::Elem,
-        beta: Self::Elem,
+//        beta: Self::Elem,
         c: *mut Self::Elem, rsc: isize, csc: isize);
 }
 
@@ -54,6 +54,7 @@ pub trait Element : Copy {
     fn zero() -> Self;
     fn one() -> Self;
     fn is_zero(&self) -> bool;
+    fn is_one(&self) -> bool;
     fn scale_by(&mut self, x: Self);
     fn scaled_add(&mut self, alpha: Self, a: Self);
 }
@@ -62,6 +63,7 @@ impl Element for f32 {
     fn zero() -> Self { 0. }
     fn one() -> Self { 1. }
     fn is_zero(&self) -> bool { *self == 0. }
+    fn is_one(&self) -> bool { *self == 1. }
     fn scale_by(&mut self, x: Self) {
         *self *= x;
     }
@@ -74,6 +76,7 @@ impl Element for f64 {
     fn zero() -> Self { 0. }
     fn one() -> Self { 1. }
     fn is_zero(&self) -> bool { *self == 0. }
+    fn is_one(&self) -> bool { *self == 1. }
     fn scale_by(&mut self, x: Self) {
         *self *= x;
     }

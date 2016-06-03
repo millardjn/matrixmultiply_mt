@@ -84,6 +84,7 @@ pub unsafe fn dgemm(
         c, rsc, csc)
 }
 
+const MASK_SIZE: usize = 96;
 /// Ensure that GemmKernel parameters are supported
 /// (alignment, microkernel size).
 ///
@@ -94,9 +95,9 @@ fn ensure_kernel_params<K>()
 {
     let mr = K::mr();
     let nr = K::nr();
-    assert!(mr > 0 && mr <= 8);
-    assert!(nr > 0 && nr <= 8);
-    assert!(mr * nr * size_of::<K::Elem>() <= 8 * 4 * 8);
+    assert!(mr > 0 );
+    assert!(nr > 0 );
+    assert!(mr * nr <= MASK_SIZE);
     assert!(K::align_to() <= 32);
     // one row/col of the kernel is limiting the max align we can provide
     let max_align = size_of::<K::Elem>() * min(mr, nr);
@@ -179,10 +180,6 @@ unsafe fn gemm_packed<K>(nc: usize, kc: usize, mc: usize,
 {
     let mr = K::mr();
     let nr = K::nr();
-    // make a mask buffer that fits 8 x 8 f32 and 8 x 4 f64 kernels and alignment
-    assert!(mr * nr * size_of::<K::Elem>() <= 256 && K::align_to() <= 32);
-    let mut mask_buf = [0u8; 256 + 31];
-    let mask_ptr = align_ptr(32, mask_buf.as_mut_ptr()) as *mut K::Elem;
 
     // LOOP 2: through micropanels in packed `b`
     for (l2, nr_) in range_chunk(nc, nr) {
@@ -194,16 +191,32 @@ unsafe fn gemm_packed<K>(nc: usize, kc: usize, mc: usize,
             let app = app.stride_offset(1, kc * mr * l1);
             let c = c.stride_offset(rsc, mr * l1);
 
+			// Zero or prescale if necessary
+        	if beta.is_zero() {
+			    for j in 0..nr_ {
+			        for i in 0..mr_ {
+			        	let cptr = c.offset(rsc * i as isize + csc * j as isize);
+						*cptr = K::Elem::zero(); // initialize C
+			        }
+			    }        		
+        	} else if ! beta.is_one(){
+			    for j in 0..nr_ {
+			        for i in 0..mr_ {
+			        	let cptr = c.offset(rsc * i as isize + csc * j as isize);
+						(*cptr).scale_by(beta);
+			        }
+			    }        		
+        	}			
+
             // GEMM KERNEL
             // NOTE: For the rust kernels, it performs better to simply
             // always use the masked kernel function!
             if K::always_masked() || nr_ < nr || mr_ < mr {
                 masked_kernel::<_, K>(kc, alpha, &*app, &*bpp,
-                                      beta, &mut *c, rsc, csc,
-                                      mr_, nr_, mask_ptr);
-                continue;
+                                       &mut *c, rsc, csc,
+                                      mr_, nr_);
             } else {
-                K::kernel(kc, alpha, app, bpp, beta, c, rsc, csc);
+                K::kernel(kc, alpha, app, bpp, c, rsc, csc);
             }
         }
     }
@@ -320,26 +333,19 @@ unsafe fn pack<T>(kc: usize, mc: usize, mr: usize, pack: *mut T,
 unsafe fn masked_kernel<T, K>(k: usize, alpha: T,
                               a: *const T,
                               b: *const T,
-                              beta: T,
                               c: *mut T, rsc: isize, csc: isize,
-                              rows: usize, cols: usize,
-                              mask_buf: *mut T)
+                              rows: usize, cols: usize)
     where K: GemmKernel<Elem=T>, T: Element,
 {
     let mr = K::mr();
     let nr = K::nr();
-    // use column major order for `mask_buf`
-    K::kernel(k, T::one(), a, b, T::zero(), mask_buf, 1, mr as isize);
-    let mut ab = mask_buf;
+    let mut ab_ = [T::zero(); MASK_SIZE];
+    let mut ab = &mut ab_[0] as *mut T;
+    K::kernel(k, T::one(), a, b, ab, 1, mr as isize);
     for j in 0..nr {
         for i in 0..mr {
             if i < rows && j < cols {
                 let cptr = c.offset(rsc * i as isize + csc * j as isize);
-                if beta.is_zero() {
-                    *cptr = T::zero(); // initialize C
-                } else {
-                    (*cptr).scale_by(beta);
-                }
                 (*cptr).scaled_add(alpha, *ab);
             }
             ab.inc();

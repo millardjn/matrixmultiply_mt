@@ -43,9 +43,8 @@ impl GemmKernel for Gemm {
         alpha: T,
         a: *const T,
         b: *const T,
-        beta: T,
         c: *mut T, rsc: isize, csc: isize) {
-        kernel(k, alpha, a, b, beta, c, rsc, csc)
+        kernel(k, alpha, a, b, c, rsc, csc)
     }
 }
 
@@ -63,12 +62,11 @@ impl GemmKernel for Gemm {
 /// + if beta is 0, then c does not need to be initialized
 #[inline(always)]
 pub unsafe fn kernel(k: usize, alpha: T, a: *const T, b: *const T,
-                     beta: T, c: *mut T, rsc: isize, csc: isize)
+                     c: *mut T, rsc: isize, csc: isize)
 {
     let mut ab = [[0.; NR]; MR];
     let mut a = a;
     let mut b = b;
-    debug_assert_eq!(beta, 0.); // always masked
 
     // Compute matrix multiplication into ab[i][j]
     unroll_by_4!(k, {
@@ -86,7 +84,7 @@ pub unsafe fn kernel(k: usize, alpha: T, a: *const T, b: *const T,
     }
 
     // set C = α A B
-    loop8!(i, loop4!(j, *c![i, j] = alpha * ab[i][j]));
+    loop8!(i, loop4!(j, *c![i, j] += alpha * ab[i][j]));
 }
 
 #[inline(always)]
@@ -107,7 +105,8 @@ fn test_gemm_kernel() {
     let mut c = [0.; 32];
     unsafe {
         kernel(4, 1., &a[0], &b[0],
-               0., &mut c[0], 1, 8);
+ //              0., 
+               &mut c[0], 1, 8);
         // transposed C so that results line up
     }
     assert_eq!(&a, &c);
