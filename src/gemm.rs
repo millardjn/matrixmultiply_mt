@@ -8,7 +8,7 @@
 extern crate num_cpus;
 extern crate crossbeam;
 
-use std::cmp::min;
+use std::cmp::{min, max};
 use std::mem::size_of;
 
 use util::range_chunk;
@@ -117,13 +117,18 @@ unsafe fn gemm_loop<K>(
     c: *mut K::Elem, rsc: isize, csc: isize)
     where K: GemmKernel
 {
+    let num_cpus = num_cpus::get();
+    
     debug_assert!(m * n == 0 || (rsc != 0 && csc != 0));
     let knc = K::nc();
     let kkc = K::kc();
-    let kmc = K::mc();
+    //let kmc = K::mc();
+    let kmc = max(min((m + num_cpus - 1)/num_cpus, K::mc()), max(K::mc()/4, 1));
+    let num_cpus = (m + kmc - 1)/kmc;
+
     ensure_kernel_params::<K>();
 
-	let num_cpus = num_cpus::get();
+	
     let (mut packv, app_size) = packing_vec::<K>(m, k, n, num_cpus);
     let app_base = make_aligned_vec_ptr(K::align_to(), &mut packv);
     let bpp = app_base.offset(app_size * num_cpus as isize);
@@ -152,7 +157,7 @@ unsafe fn gemm_loop<K>(
 			crossbeam::scope(|scope|{
 				for cpu_id in 0..num_cpus{
 					
-					if cpu_id * kmc >= m {continue;}
+					//if cpu_id * kmc >= m {continue;}
 					
 					let p = Ptrs::<K>{app_base:app_base, bpp:bpp, a:a, c:c};
 					scope.spawn(move || {
