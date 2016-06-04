@@ -16,3 +16,5 @@ keywords = ["matrix", "sgemm", "dgemm"]
 bench = false
 
 [dependencies]
+num_cpus = "0.2"
+crossbeam = "0.2"

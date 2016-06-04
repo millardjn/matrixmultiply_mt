@@ -50,7 +50,7 @@ pub trait GemmKernel {
         c: *mut Self::Elem, rsc: isize, csc: isize);
 }
 
-pub trait Element : Copy {
+pub trait Element : Copy + Send{
     fn zero() -> Self;
     fn one() -> Self;
     fn is_zero(&self) -> bool;
