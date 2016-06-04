@@ -68,11 +68,11 @@ impl GemmKernel for Gemm {
     fn always_masked() -> bool { false }
 
     #[inline(always)]
-    fn nc() -> usize { (archparam::S_NC + NR - 1)/(NR) *(NR) }
+    fn nc() -> usize { (archparam::S_NC + NR - 1)/NR * NR }
     #[inline(always)]
     fn kc() -> usize { archparam::S_KC }
     #[inline(always)]
-    fn mc() -> usize { (archparam::S_MC + MR - 1)/(MR) *(MR) }
+    fn mc() -> usize { (archparam::S_MC + MR - 1)/MR * MR }
 
     #[inline(always)]
     unsafe fn kernel(

@@ -21,7 +21,7 @@ pub const S_NC: usize = 1024;
 /// Cuts Bj into Bp, which is packed into B~.
 ///
 /// Size of B~ is NC x KC
-pub const S_KC: usize = 256;
+pub const S_KC: usize = 384;
 
 /// Rows of Ap at a time. (3rd loop)
 ///
@@ -30,7 +30,7 @@ pub const S_KC: usize = 256;
 /// Ai is packed into A~.
 ///
 /// Size of A~ is KC x MC
-pub const S_MC: usize = 64;
+pub const S_MC: usize = 32;
 
 /// Columns in C, B that we handle at a time. (5th loop)
 /// 
