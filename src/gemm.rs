@@ -54,13 +54,28 @@ pub unsafe fn sgemm(
     beta: f32,
     c: *mut f32, rsc: isize, csc: isize)
 {
-    gemm_loop::<sgemm_kernel::Gemm>(
-        m, k, n,
-        alpha,
-        a, rsa, csa,
-        b, rsb, csb,
-        beta,
-        c, rsc, csc)
+    
+    if n > m {
+    	// Transpose problem for performance, switch m and n, csx and rsx, A and B
+	    gemm_loop::<sgemm_kernel::Gemm>(
+	        n, k, m,
+	        alpha,
+	        b, csb, rsb,
+	        a, csa, rsa,
+	        beta,
+	        c, csc, rsc)     	
+    	
+    } else {
+	    gemm_loop::<sgemm_kernel::Gemm>(
+	        m, k, n,
+	        alpha,
+	        a, rsa, csa,
+	        b, rsb, csb,
+	        beta,
+	        c, rsc, csc)    	
+    	
+    }
+
 }
 
 /// General matrix multiplication (f64)

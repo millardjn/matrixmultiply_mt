@@ -35,7 +35,7 @@ pub const S_MC: usize = 64;
 /// Columns in C, B that we handle at a time. (5th loop)
 /// 
 /// Cuts B into B0, B1, .. Bj, .. B_NC
-pub const D_NC: usize = 1024;
+pub const D_NC: usize = 512;
 
 /// Rows of Bj at a time (4th loop)
 ///
@@ -55,4 +55,4 @@ pub const D_KC: usize = 256;
 /// Ai is packed into A~.
 ///
 /// Size of A~ is KC x MC
-pub const D_MC: usize = 64;
+pub const D_MC: usize = 32;
