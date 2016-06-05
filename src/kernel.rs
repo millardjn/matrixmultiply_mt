@@ -7,7 +7,7 @@
 // except according to those terms.
 
 /// General matrix multiply kernel
-pub trait GemmKernel {
+pub trait GemmKernel: 'static {
     type Elem: Element;
 
     /// align inputs to this

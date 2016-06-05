@@ -5,8 +5,13 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
+
+
 extern crate num_cpus;
-extern crate crossbeam;
+extern crate threadpool;
+
+use threadpool::ThreadPool;
+use std::sync::{Mutex, Arc, Barrier};
 
 use std::cmp::{min, max};
 use std::mem::size_of;
@@ -19,6 +24,11 @@ use kernel::Element;
 use sgemm_kernel;
 use dgemm_kernel;
 use pointer::PointerExt;
+
+lazy_static! {
+	static ref NUM_CPUS: usize = num_cpus::get();
+    static ref THREAD_POOL: Mutex<ThreadPool> = Mutex::new(ThreadPool::new(*NUM_CPUS));
+}
 
 /// General matrix multiplication (f32)
 ///
@@ -117,21 +127,25 @@ unsafe fn gemm_loop<K>(
     c: *mut K::Elem, rsc: isize, csc: isize)
     where K: GemmKernel
 {
-    let num_cpus = num_cpus::get();
     
     debug_assert!(m * n == 0 || (rsc != 0 && csc != 0));
     let knc = K::nc();
     let kkc = K::kc();
     //let kmc = K::mc();
-    let kmc = max(min((m + num_cpus - 1)/num_cpus, K::mc()), max(K::mc()/4, 1));
-    let num_cpus = (m + kmc - 1)/kmc;
-
+    let kmc = max(
+    			// rough adaption, this can be improved to ensure each thread gets an equal number of chunks
+    			min((m + *NUM_CPUS - 1)/ *NUM_CPUS, K::mc()),
+    			max(K::mc()/2, K::mr())
+              );
+    let num_threads = min((m + kmc - 1)/kmc, *NUM_CPUS);
+	let pool_opt = if num_threads > 1 {THREAD_POOL.lock().ok()} else {None};
+	
     ensure_kernel_params::<K>();
 
 	
-    let (mut packv, app_size) = packing_vec::<K>(m, k, n, num_cpus);
+    let (mut packv, app_size) = packing_vec::<K>(m, k, n, num_threads);
     let app_base = make_aligned_vec_ptr(K::align_to(), &mut packv);
-    let bpp = app_base.offset(app_size * num_cpus as isize);
+    let bpp = app_base.offset(app_size * num_threads as isize);
 
 
     // LOOP 5: split n into nc parts
@@ -153,47 +167,51 @@ unsafe fn gemm_loop<K>(
 			// Need a struct to smuggle pointers across threads. ugh!
 			struct Ptrs<K: GemmKernel>{app_base: *mut K::Elem, bpp: *mut K::Elem, a: *const K::Elem, c: *mut K::Elem}
 			unsafe impl <K: GemmKernel> Send for Ptrs<K>{}
-			
-			crossbeam::scope(|scope|{
-				for cpu_id in 0..num_cpus{
-					
-					//if cpu_id * kmc >= m {continue;}
-					
-					let p = Ptrs::<K>{app_base:app_base, bpp:bpp, a:a, c:c};
-					scope.spawn(move || {
-						let bpp = p.bpp;	
-						let app = p.app_base.offset(app_size * cpu_id as isize);
-						let a = p.a;
-						let c = p.c;
-						
-							
-			            // LOOP 3: split m into mc parts
-			            for (l3, mc) in range_chunk(m, kmc) {
-			            	if l3%num_cpus != cpu_id {continue;}
-			            	
-			                dprint!("LOOP 3, {}, mc={}", l3, mc);
-			                let a = a.stride_offset(rsa, kmc * l3);
-			                let c = c.stride_offset(rsc, kmc * l3);
-			
-			                // Pack A -> A~
-			                pack(kc, mc, K::mr(), app, a, rsa, csa);
-			
-			                // First time writing to C, use user's `beta`, else accumulate
-			                let betap = if l4 == 0 { beta } else { <_>::one() };
-			
-			                // LOOP 2 and 1
-			                gemm_packed::<K>(nc, kc, mc,
-			                                 alpha,
-			                                 app, bpp,
-			                                 betap,
-			                                 c, rsc, csc);
-			            }							
-							
-					});
-				}
-			});
-			
+	
+			let barrier = Arc::new(Barrier::new(num_threads));
+			for cpu_id in 0..num_threads{
 
+				let p = Ptrs::<K>{app_base:app_base, bpp:bpp, a:a, c:c};
+				let barrier = barrier.clone();
+				
+				let work = move || {
+					let bpp = p.bpp;	
+					let app = p.app_base.offset(app_size * cpu_id as isize);
+					let a = p.a;
+					let c = p.c;
+					
+						
+		            // LOOP 3: split m into mc parts
+		            for (l3, mc) in range_chunk(m, kmc) {
+		            	if l3%num_threads != cpu_id {continue;} // threads leapfrog each other
+		            	
+		                dprint!("LOOP 3, {}, mc={}", l3, mc);
+		                let a = a.stride_offset(rsa, kmc * l3);
+		                let c = c.stride_offset(rsc, kmc * l3);
+		
+		                // Pack A -> A~
+		                pack(kc, mc, K::mr(), app, a, rsa, csa);
+		
+		                // First time writing to C, use user's `beta`, else accumulate
+		                let betap = if l4 == 0 { beta } else { <_>::one() };
+		
+		                // LOOP 2 and 1
+		                gemm_packed::<K>(nc, kc, mc,
+		                                 alpha,
+		                                 app, bpp,
+		                                 betap,
+		                                 c, rsc, csc);
+		            }							
+					barrier.wait();	
+				};
+				
+				if let (Some(pool), true) = (pool_opt.as_ref(), cpu_id < num_threads - 1) {
+					pool.execute(work);
+				} else {
+					work();
+				}
+				
+			}
         }
     }
 }

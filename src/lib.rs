@@ -47,7 +47,8 @@
 //!
 //! Stides can be negative or even zero, but for a mutable matrix elements
 //! may not alias each other.
-
+extern crate threadpool;
+#[macro_use] extern crate lazy_static;
 #[macro_use] mod debugmacros;
 #[macro_use] mod loopmacros;
 mod archparam;
