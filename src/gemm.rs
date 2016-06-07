@@ -46,34 +46,28 @@ lazy_static! {
 /// elements that alias each other, for example they can not be zero.
 ///
 /// If β is zero, then C does not need to be initialized.
-pub unsafe fn sgemm(
-    m: usize, k: usize, n: usize,
-    alpha: f32,
-    a: *const f32, rsa: isize, csa: isize,
-    b: *const f32, rsb: isize, csb: isize,
-    beta: f32,
-    c: *mut f32, rsc: isize, csc: isize)
-{
-    
+pub unsafe fn sgemm(m: usize,
+                    k: usize,
+                    n: usize,
+                    alpha: f32,
+                    a: *const f32,
+                    rsa: isize,
+                    csa: isize,
+                    b: *const f32,
+                    rsb: isize,
+                    csb: isize,
+                    beta: f32,
+                    c: *mut f32,
+                    rsc: isize,
+                    csc: isize) {
+
     if n > m {
-    	// Transpose problem for performance, switch m and n, csx and rsx, A and B
-	    gemm_loop::<sgemm_kernel::Gemm>(
-	        n, k, m,
-	        alpha,
-	        b, csb, rsb,
-	        a, csa, rsa,
-	        beta,
-	        c, csc, rsc)     	
-    	
+        // Transpose problem for performance, switch m and n, csx and rsx, A and B
+        gemm_loop::<sgemm_kernel::Gemm>(n, k, m, alpha, b, csb, rsb, a, csa, rsa, beta, c, csc, rsc)
+
     } else {
-	    gemm_loop::<sgemm_kernel::Gemm>(
-	        m, k, n,
-	        alpha,
-	        a, rsa, csa,
-	        b, rsb, csb,
-	        beta,
-	        c, rsc, csc)    	
-    	
+        gemm_loop::<sgemm_kernel::Gemm>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
+
     }
 
 }
@@ -94,21 +88,21 @@ pub unsafe fn sgemm(
 /// elements that alias each other, for example they can not be zero.
 ///
 /// If β is zero, then C does not need to be initialized.
-pub unsafe fn dgemm(
-    m: usize, k: usize, n: usize,
-    alpha: f64,
-    a: *const f64, rsa: isize, csa: isize,
-    b: *const f64, rsb: isize, csb: isize,
-    beta: f64,
-    c: *mut f64, rsc: isize, csc: isize)
-{
-    gemm_loop::<dgemm_kernel::Gemm>(
-        m, k, n,
-        alpha,
-        a, rsa, csa,
-        b, rsb, csb,
-        beta,
-        c, rsc, csc)
+pub unsafe fn dgemm(m: usize,
+                    k: usize,
+                    n: usize,
+                    alpha: f64,
+                    a: *const f64,
+                    rsa: isize,
+                    csa: isize,
+                    b: *const f64,
+                    rsb: isize,
+                    csb: isize,
+                    beta: f64,
+                    c: *mut f64,
+                    rsc: isize,
+                    csc: isize) {
+    gemm_loop::<dgemm_kernel::Gemm>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
 }
 
 const MASK_SIZE: usize = 96;
@@ -122,8 +116,8 @@ fn ensure_kernel_params<K>()
 {
     let mr = K::mr();
     let nr = K::nr();
-    assert!(mr > 0 );
-    assert!(nr > 0 );
+    assert!(mr > 0);
+    assert!(nr > 0);
     assert!(mr * nr <= MASK_SIZE);
     assert!(K::align_to() <= 32);
     // one row/col of the kernel is limiting the max align we can provide
@@ -133,31 +127,40 @@ fn ensure_kernel_params<K>()
 
 /// Implement matrix multiply using packed buffers and a microkernel
 /// strategy, the type parameter `K` is the gemm microkernel.
-unsafe fn gemm_loop<K>(
-    m: usize, k: usize, n: usize,
-    alpha: K::Elem,
-    a: *const K::Elem, rsa: isize, csa: isize,
-    b: *const K::Elem, rsb: isize, csb: isize,
-    beta: K::Elem,
-    c: *mut K::Elem, rsc: isize, csc: isize)
+unsafe fn gemm_loop<K>(m: usize,
+                       k: usize,
+                       n: usize,
+                       alpha: K::Elem,
+                       a: *const K::Elem,
+                       rsa: isize,
+                       csa: isize,
+                       b: *const K::Elem,
+                       rsb: isize,
+                       csb: isize,
+                       beta: K::Elem,
+                       c: *mut K::Elem,
+                       rsc: isize,
+                       csc: isize)
     where K: GemmKernel
 {
-    
+
     debug_assert!(m * n == 0 || (rsc != 0 && csc != 0));
     let knc = K::nc();
     let kkc = K::kc();
-    //let kmc = K::mc();
-    let kmc = max(
-    			// rough adaption, this can be improved to ensure each thread gets an equal number of chunks
-    			min((m + *NUM_CPUS - 1)/ *NUM_CPUS, K::mc()),
-    			max(K::mc()/2, K::mr())
-              );
-    let num_threads = min((m + kmc - 1)/kmc, *NUM_CPUS);
-	let pool_opt = if num_threads > 1 {THREAD_POOL.lock().ok()} else {None};
-	
+    // let kmc = K::mc();
+    // rough adaption, this can be improved to ensure each thread gets an equal number of chunks
+    let kmc = max(min((m + *NUM_CPUS - 1) / *NUM_CPUS, K::mc()),
+                  max(K::mc() / 4, K::mr()));
+    let num_threads = min((m + kmc - 1) / kmc, *NUM_CPUS);
+    let pool_opt = if num_threads > 1 {
+        THREAD_POOL.lock().ok()
+    } else {
+        None
+    };
+
     ensure_kernel_params::<K>();
 
-	
+
     let (mut packv, app_size) = packing_vec::<K>(m, k, n, num_threads);
     let app_base = make_aligned_vec_ptr(K::align_to(), &mut packv);
     let bpp = app_base.offset(app_size * num_threads as isize);
@@ -174,59 +177,73 @@ unsafe fn gemm_loop<K>(
             dprint!("LOOP 4, {}, kc={}", l4, kc);
             let b = b.stride_offset(rsb, kkc * l4);
             let a = a.stride_offset(csa, kkc * l4);
-            debug!(for elt in &mut packv { *elt = <_>::one(); });
+            debug!(for elt in &mut packv {
+                *elt = <_>::one();
+            });
 
             // Pack B -> B~
             pack(kc, nc, K::nr(), bpp, b, csb, rsb);
 
-			// Need a struct to smuggle pointers across threads. ugh!
-			struct Ptrs<K: GemmKernel>{app_base: *mut K::Elem, bpp: *mut K::Elem, a: *const K::Elem, c: *mut K::Elem}
-			unsafe impl <K: GemmKernel> Send for Ptrs<K>{}
-	
-			let barrier = Arc::new(Barrier::new(num_threads));
-			for cpu_id in 0..num_threads{
+            // Need a struct to smuggle pointers across threads. ugh!
+            struct Ptrs<K: GemmKernel> {
+                app_base: *mut K::Elem,
+                bpp: *mut K::Elem,
+                a: *const K::Elem,
+                c: *mut K::Elem,
+            }
+            unsafe impl<K: GemmKernel> Send for Ptrs<K> {}
 
-				let p = Ptrs::<K>{app_base:app_base, bpp:bpp, a:a, c:c};
-				let barrier = barrier.clone();
-				
-				let work = move || {
-					let bpp = p.bpp;	
-					let app = p.app_base.offset(app_size * cpu_id as isize);
-					let a = p.a;
-					let c = p.c;
-					
-						
-		            // LOOP 3: split m into mc parts
-		            for (l3, mc) in range_chunk(m, kmc) {
-		            	if l3%num_threads != cpu_id {continue;} // threads leapfrog each other
-		            	
-		                dprint!("LOOP 3, {}, mc={}", l3, mc);
-		                let a = a.stride_offset(rsa, kmc * l3);
-		                let c = c.stride_offset(rsc, kmc * l3);
-		
-		                // Pack A -> A~
-		                pack(kc, mc, K::mr(), app, a, rsa, csa);
-		
-		                // First time writing to C, use user's `beta`, else accumulate
-		                let betap = if l4 == 0 { beta } else { <_>::one() };
-		
-		                // LOOP 2 and 1
-		                gemm_packed::<K>(nc, kc, mc,
-		                                 alpha,
-		                                 app, bpp,
-		                                 betap,
-		                                 c, rsc, csc);
-		            }							
-					barrier.wait();	
-				};
-				
-				if let (Some(pool), true) = (pool_opt.as_ref(), cpu_id < num_threads - 1) {
-					pool.execute(work);
-				} else {
-					work();
-				}
-				
-			}
+            let barrier = Arc::new(Barrier::new(num_threads));
+            for cpu_id in 0..num_threads {
+
+                let p = Ptrs::<K> {
+                    app_base: app_base,
+                    bpp: bpp,
+                    a: a,
+                    c: c,
+                };
+                let barrier = barrier.clone();
+
+                let work = move || {
+                    let bpp = p.bpp;
+                    let app = p.app_base.offset(app_size * cpu_id as isize);
+                    let a = p.a;
+                    let c = p.c;
+
+
+                    // LOOP 3: split m into mc parts
+                    for (l3, mc) in range_chunk(m, kmc) {
+                        if l3 % num_threads != cpu_id {
+                            continue;
+                        } // threads leapfrog each other
+
+                        dprint!("LOOP 3, {}, mc={}", l3, mc);
+                        let a = a.stride_offset(rsa, kmc * l3);
+                        let c = c.stride_offset(rsc, kmc * l3);
+
+                        // Pack A -> A~
+                        pack(kc, mc, K::mr(), app, a, rsa, csa);
+
+                        // First time writing to C, use user's `beta`, else accumulate
+                        let betap = if l4 == 0 {
+                            beta
+                        } else {
+                            <_>::one()
+                        };
+
+                        // LOOP 2 and 1
+                        gemm_packed::<K>(nc, kc, mc, alpha, app, bpp, betap, c, rsc, csc);
+                    }
+                    barrier.wait();
+                };
+
+                if let (Some(pool), true) = (pool_opt.as_ref(), cpu_id < num_threads - 1) {
+                    pool.execute(work);
+                } else {
+                    work();
+                }
+
+            }
         }
     }
 }
@@ -238,15 +255,27 @@ unsafe fn gemm_loop<K>(
 /// + nc: columns of packed B
 /// + kc: columns of packed A / rows of packed B
 /// + mc: rows of packed A
-unsafe fn gemm_packed<K>(nc: usize, kc: usize, mc: usize,
+unsafe fn gemm_packed<K>(nc: usize,
+                         kc: usize,
+                         mc: usize,
                          alpha: K::Elem,
-                         app: *const K::Elem, bpp: *const K::Elem,
+                         app: *const K::Elem,
+                         bpp: *const K::Elem,
                          beta: K::Elem,
-                         c: *mut K::Elem, rsc: isize, csc: isize)
-    where K: GemmKernel,
+                         c: *mut K::Elem,
+                         rsc: isize,
+                         csc: isize)
+    where K: GemmKernel
 {
     let mr = K::mr();
     let nr = K::nr();
+
+    // Zero or prescale if necessary
+    if beta.is_zero() {
+        zero_block::<K>(mc, nc, c, rsc, csc);
+    } else if !beta.is_one() {
+        scale_block::<K>(beta, mc, nc, c, rsc, csc);
+    }
 
     // LOOP 2: through micropanels in packed `b`
     for (l2, nr_) in range_chunk(nc, nr) {
@@ -258,32 +287,81 @@ unsafe fn gemm_packed<K>(nc: usize, kc: usize, mc: usize,
             let app = app.stride_offset(1, kc * mr * l1);
             let c = c.stride_offset(rsc, mr * l1);
 
-			// Zero or prescale if necessary
-        	if beta.is_zero() {
-			    for j in 0..nr_ {
-			        for i in 0..mr_ {
-			        	let cptr = c.offset(rsc * i as isize + csc * j as isize);
-						*cptr = K::Elem::zero(); // initialize C
-			        }
-			    }        		
-        	} else if ! beta.is_one(){
-			    for j in 0..nr_ {
-			        for i in 0..mr_ {
-			        	let cptr = c.offset(rsc * i as isize + csc * j as isize);
-						(*cptr).scale_by(beta);
-			        }
-			    }        		
-        	}			
+            // 			if beta.is_zero() {
+            // 				zero_block::<K>(mr_, nr_, c, rsc, csc);
+            // 			} else if ! beta.is_one(){
+            // 				scale_block::<K>(beta, mr_, nr_, c, rsc, csc);
+            // 			}
+
 
             // GEMM KERNEL
             // NOTE: For the rust kernels, it performs better to simply
             // always use the masked kernel function!
             if K::always_masked() || nr_ < nr || mr_ < mr {
-                masked_kernel::<_, K>(kc, alpha, &*app, &*bpp,
-                                       &mut *c, rsc, csc,
-                                      mr_, nr_);
+                masked_kernel::<_, K>(kc, alpha, &*app, &*bpp, &mut *c, rsc, csc, mr_, nr_);
             } else {
                 K::kernel(kc, alpha, app, bpp, c, rsc, csc);
+            }
+        }
+    }
+}
+
+unsafe fn scale_block<K: GemmKernel>(beta: K::Elem,
+                                     rows: usize,
+                                     cols: usize,
+                                     c: *mut K::Elem,
+                                     rsc: isize,
+                                     csc: isize) {
+
+    if rsc == 1 {
+        for col in 0..cols {
+            for row in 0..rows {
+                let cptr = c.offset(1 * row as isize + csc * col as isize);
+                (*cptr).scale_by(beta);
+            }
+        }
+    } else if csc == 1 {
+        for row in 0..rows {
+            for col in 0..cols {
+                let cptr = c.offset(rsc * row as isize + 1 * col as isize);
+                (*cptr).scale_by(beta);
+            }
+        }
+    } else {
+        for col in 0..cols {
+            for row in 0..rows {
+                let cptr = c.offset(rsc * row as isize + csc * col as isize);
+                (*cptr).scale_by(beta);
+            }
+        }
+    }
+}
+
+unsafe fn zero_block<K: GemmKernel>(rows: usize,
+                                    cols: usize,
+                                    c: *mut K::Elem,
+                                    rsc: isize,
+                                    csc: isize) {
+
+    if rsc == 1 {
+        for col in 0..cols {
+            for row in 0..rows {
+                let cptr = c.offset(1 * row as isize + csc * col as isize);
+                *cptr = K::Elem::zero(); // initialize C
+            }
+        }
+    } else if csc == 1 {
+        for row in 0..rows {
+            for col in 0..cols {
+                let cptr = c.offset(rsc * row as isize + 1 * col as isize);
+                *cptr = K::Elem::zero(); // initialize C
+            }
+        }
+    } else {
+        for col in 0..cols {
+            for row in 0..rows {
+                let cptr = c.offset(rsc * row as isize + csc * col as isize);
+                *cptr = K::Elem::zero(); // initialize C
             }
         }
     }
@@ -298,7 +376,7 @@ unsafe fn gemm_packed<K>(nc: usize, kc: usize, mc: usize,
 ///
 /// Return packing vector and offset to start of b
 unsafe fn packing_vec<K>(m: usize, k: usize, n: usize, num_a: usize) -> (Vec<K::Elem>, isize)
-    where K: GemmKernel,
+    where K: GemmKernel
 {
     let m = min(m, K::mc());
     let k = min(k, K::kc());
@@ -312,8 +390,12 @@ unsafe fn packing_vec<K>(m: usize, k: usize, n: usize, num_a: usize) -> (Vec<K::
     v.set_len(nelem);
     dprint!("packed nelem={}, apack={}, bpack={},
              m={} k={} n={}",
-             nelem, apack_size, bpack_size,
-             m,k,n);
+            nelem,
+            apack_size,
+            bpack_size,
+            m,
+            k,
+            n);
     // max alignment requirement is a multiple of min(MR, NR) * sizeof<Elem>
     // because apack_size is a multiple of MR, start of b aligns fine
     (v, apack_size as isize)
@@ -352,12 +434,17 @@ unsafe fn align_ptr<U>(align_to: usize, mut ptr: *mut U) -> *mut U {
 /// + rsa: row stride
 /// + csa: column stride
 /// + zero: zero element to pad with
-unsafe fn pack<T>(kc: usize, mc: usize, mr: usize, pack: *mut T,
-                  a: *const T, rsa: isize, csa: isize)
+unsafe fn pack<T>(kc: usize,
+                  mc: usize,
+                  mr: usize,
+                  pack: *mut T,
+                  a: *const T,
+                  rsa: isize,
+                  csa: isize)
     where T: Element
 {
     let mut pack = pack;
-    for ir in 0..mc/mr {
+    for ir in 0..mc / mr {
         let row_offset = ir * mr;
         for j in 0..kc {
             for i in 0..mr {
@@ -373,7 +460,7 @@ unsafe fn pack<T>(kc: usize, mc: usize, mr: usize, pack: *mut T,
     // Pad with zeros to multiple of kernel size (uneven mc)
     let rest = mc % mr;
     if rest > 0 {
-        let row_offset = (mc/mr) * mr;
+        let row_offset = (mc / mr) * mr;
         for j in 0..kc {
             for i in 0..mr {
                 if i < rest {
@@ -389,7 +476,7 @@ unsafe fn pack<T>(kc: usize, mc: usize, mr: usize, pack: *mut T,
 }
 
 /// Call the GEMM kernel with a "masked" output C.
-/// 
+///
 /// Simply redirect the MR by NR kernel output to the passed
 /// in `mask_buf`, and copy the non masked region to the real
 /// C.
@@ -397,12 +484,17 @@ unsafe fn pack<T>(kc: usize, mc: usize, mr: usize, pack: *mut T,
 /// + rows: rows of kernel unmasked
 /// + cols: cols of kernel unmasked
 #[inline(never)]
-unsafe fn masked_kernel<T, K>(k: usize, alpha: T,
+unsafe fn masked_kernel<T, K>(k: usize,
+                              alpha: T,
                               a: *const T,
                               b: *const T,
-                              c: *mut T, rsc: isize, csc: isize,
-                              rows: usize, cols: usize)
-    where K: GemmKernel<Elem=T>, T: Element,
+                              c: *mut T,
+                              rsc: isize,
+                              csc: isize,
+                              rows: usize,
+                              cols: usize)
+    where K: GemmKernel<Elem = T>,
+          T: Element
 {
     let mr = K::mr();
     let nr = K::nr();

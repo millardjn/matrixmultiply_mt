@@ -8,7 +8,11 @@
 
 use std::cmp::min;
 
-pub struct RangeChunk { i: usize, n: usize, chunk: usize }
+pub struct RangeChunk {
+    i: usize,
+    n: usize,
+    chunk: usize,
+}
 
 /// Create an iterator that splits `n` in chunks of size `chunk`;
 /// the last item can be an uneven chunk.
@@ -40,6 +44,8 @@ impl Iterator for RangeChunk {
 #[inline]
 pub fn round_up_to(x: usize, multiple_of: usize) -> usize {
     let (mut d, r) = (x / multiple_of, x % multiple_of);
-    if r > 0 { d += 1; }
+    if r > 0 {
+        d += 1;
+    }
     d * multiple_of
 }

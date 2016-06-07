@@ -41,16 +41,17 @@ pub trait GemmKernel: 'static {
     /// + rsc: row stride of c
     /// + csc: col stride of c
     /// + if `beta` is `0.`, then c does not need to be initialized
-    unsafe fn kernel(
-        k: usize,
-        alpha: Self::Elem,
-        a: *const Self::Elem,
-        b: *const Self::Elem,
-//        beta: Self::Elem,
-        c: *mut Self::Elem, rsc: isize, csc: isize);
+    unsafe fn kernel(k: usize,
+                     alpha: Self::Elem,
+                     a: *const Self::Elem,
+                     b: *const Self::Elem,
+                     // beta: Self::Elem,
+                     c: *mut Self::Elem,
+                     rsc: isize,
+                     csc: isize);
 }
 
-pub trait Element : Copy + Send{
+pub trait Element: Copy + Send {
     fn zero() -> Self;
     fn one() -> Self;
     fn is_zero(&self) -> bool;
@@ -60,10 +61,18 @@ pub trait Element : Copy + Send{
 }
 
 impl Element for f32 {
-    fn zero() -> Self { 0. }
-    fn one() -> Self { 1. }
-    fn is_zero(&self) -> bool { *self == 0. }
-    fn is_one(&self) -> bool { *self == 1. }
+    fn zero() -> Self {
+        0.
+    }
+    fn one() -> Self {
+        1.
+    }
+    fn is_zero(&self) -> bool {
+        *self == 0.
+    }
+    fn is_one(&self) -> bool {
+        *self == 1.
+    }
     fn scale_by(&mut self, x: Self) {
         *self *= x;
     }
@@ -73,10 +82,18 @@ impl Element for f32 {
 }
 
 impl Element for f64 {
-    fn zero() -> Self { 0. }
-    fn one() -> Self { 1. }
-    fn is_zero(&self) -> bool { *self == 0. }
-    fn is_one(&self) -> bool { *self == 1. }
+    fn zero() -> Self {
+        0.
+    }
+    fn one() -> Self {
+        1.
+    }
+    fn is_zero(&self) -> bool {
+        *self == 0.
+    }
+    fn is_one(&self) -> bool {
+        *self == 1.
+    }
     fn scale_by(&mut self, x: Self) {
         *self *= x;
     }

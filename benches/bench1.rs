@@ -7,9 +7,11 @@ extern crate test;
 
 
 // Compute GFlop/s
-// by flop / s = 2 M N K / time
+// by flop / s =  2 x 2 M N K / time
 
-
+/// + A: m by k matrix
+/// + B: k by n matrix
+/// + C: m by n matrix
 macro_rules! mat_mul {
     ($modname:ident, $gemm:ident, $(($name:ident, $m:expr, $n:expr, $k:expr))+) => {
         mod $modname {
@@ -19,19 +21,30 @@ macro_rules! mat_mul {
             #[bench]
             fn $name(bench: &mut Bencher)
             {
-                let a = vec![0.; $m * $n]; 
-                let b = vec![0.; $n * $k];
-                let mut c = vec![0.; $m * $k];
+                let a = vec![0.; $m * $k]; 
+                let b = vec![0.; $k * $n];
+                let mut c = vec![0.; $m * $n];
                 bench.iter(|| {
                     unsafe {
+                    	// all row major
                         $gemm(
-                            $m, $n, $k,
+                            $m, $k, $n,
                             1.,
-                            a.as_ptr(), $n, 1,
-                            b.as_ptr(), $k, 1,
-                            0.,
-                            c.as_mut_ptr(), $k, 1,
-                            )
+                            a.as_ptr(), $k, 1,
+                            b.as_ptr(), $n, 1,
+                            0.1,
+                            c.as_mut_ptr(), $n, 1, 
+                            );
+						
+						// all col major
+                        $gemm(
+                            $m, $k, $n,
+                            1.,
+                            a.as_ptr(), 1, $m,
+                            b.as_ptr(), 1, $k,
+                            0.1,
+                            c.as_mut_ptr(), 1, $m,
+                            );                     
                     }
                 });
             }

@@ -7,7 +7,7 @@
 // except according to those terms.
 
 /// Extension methods for raw pointers
-pub trait PointerExt : Copy {
+pub trait PointerExt: Copy {
     unsafe fn offset(self, i: isize) -> Self;
 
     /// Increment by 1

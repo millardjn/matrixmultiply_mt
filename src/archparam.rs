@@ -5,10 +5,11 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
+
 //! architechture specific parameters
 
 /// Columns in C, B that we handle at a time. (5th loop)
-/// 
+///
 /// Cuts B into B0, B1, .. Bj, .. B_NC
 pub const S_NC: usize = 1024;
 
@@ -33,7 +34,7 @@ pub const S_KC: usize = 256;
 pub const S_MC: usize = 64;
 
 /// Columns in C, B that we handle at a time. (5th loop)
-/// 
+///
 /// Cuts B into B0, B1, .. Bj, .. B_NC
 pub const D_NC: usize = 512;
 
