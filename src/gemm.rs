@@ -150,7 +150,7 @@ unsafe fn gemm_loop<K>(m: usize,
     // let kmc = K::mc();
     // rough adaption, this can be improved to ensure each thread gets an equal number of chunks
     let kmc = max(min((m + *NUM_CPUS - 1) / *NUM_CPUS, K::mc()),
-                  max(K::mc() / 4, K::mr()));
+                  max(K::mc() / 2, K::mr()));
     let num_threads = min((m + kmc - 1) / kmc, *NUM_CPUS);
     let pool_opt = if num_threads > 1 {
         THREAD_POOL.lock().ok()
