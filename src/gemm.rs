@@ -61,15 +61,17 @@ pub unsafe fn sgemm(m: usize,
                     rsc: isize,
                     csc: isize) {
 
-    if n > m {
-        // Transpose problem for performance, switch m and n, csx and rsx, A and B
-        gemm_loop::<sgemm_kernel::Gemm>(n, k, m, alpha, b, csb, rsb, a, csa, rsa, beta, c, csc, rsc)
 
-    } else {
-        gemm_loop::<sgemm_kernel::Gemm>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
+	let (m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc) = if n > m {
+			(n, k, m, b, csb, rsb, a, csa, rsa, c, csc, rsc)
+		} else {
+			(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc)
+		};
 
-    }
+    gemm_loop::<sgemm_kernel::Gemm>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
 
+	// if m*n < NR*NR then use naive 3loop multiply
+	
 }
 
 /// General matrix multiplication (f64)
@@ -102,6 +104,13 @@ pub unsafe fn dgemm(m: usize,
                     c: *mut f64,
                     rsc: isize,
                     csc: isize) {
+
+	let (m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc) = if n > m {
+			(n, k, m, b, csb, rsb, a, csa, rsa, c, csc, rsc)
+		} else {
+			(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc)
+		};    
+    
     gemm_loop::<dgemm_kernel::Gemm>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
 }
 

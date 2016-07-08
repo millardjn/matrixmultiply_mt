@@ -13,7 +13,7 @@ pub enum Gemm { }
 
 pub type T = f32;
 
-const MR: usize = 4;
+const MR: usize = 6;
 const NR: usize = 16;
 
 macro_rules! loopMR {
@@ -22,8 +22,8 @@ macro_rules! loopMR {
         let $i = 1; $e;
         let $i = 2; $e;
         let $i = 3; $e;
-//        let $i = 4; $e;
-//        let $i = 5; $e;
+        let $i = 4; $e;
+        let $i = 5; $e;
 //        let $i = 6; $e;
 //        let $i = 7; $e;
 
@@ -139,27 +139,31 @@ pub unsafe fn kernel(k: usize,
 /// Split out compute for better vectorisation
 #[inline(never)]
 unsafe fn kernel_compute(k: usize, alpha: T, a: *const T, b: *const T, ab_: &mut [[T; NR]; MR]) {
-    let mut ab = *ab_;
-    let mut a = a;
-    let mut b = b;
-
-    // Compute matrix multiplication into ab[i][j]
-
-    for _ in 0..k {
-        // simple loop results in better register allocation than unroll
-
-        let mut v1 = [0.; NR];
-        loopNR!(i, v1[i] = at(b, i));
-        loopMR!(i, loopNR!(j, ab[i][j] += at(a, i) * v1[j]));
-
-        a = a.offset(MR as isize);
-        b = b.offset(NR as isize);
-
+    if k > 0 {
+	    let mut ab = *ab_;
+	    loopMR!(i, loopNR!(j, ab[i][j] = 0.0)); // this removes the loads from stack, and xorps the registers
+	    let mut a = a;
+	    let mut b = b;
+	
+	    // Compute matrix multiplication into ab[i][j]
+		
+	    for _ in 0..k {
+	    	
+	        // simple loop results in better register allocation than unroll
+	
+	        let mut v1 = [0.; NR];
+	        loopNR!(i, v1[i] = at(b, i));
+	        loopMR!(i, loopNR!(j, ab[i][j] += at(a, i) * v1[j]));
+	
+	        a = a.offset(MR as isize);
+	        b = b.offset(NR as isize);
+	
+	    }
+	
+	    loopMR!(i, loopNR!(j, ab[i][j] *= alpha));
+	
+	    *ab_ = ab;    	
     }
-
-    loopMR!(i, loopNR!(j, ab[i][j] *= alpha));
-
-    *ab_ = ab;
 }
 
 /// Choose writes to C in a cache/vectorisation friendly manner
