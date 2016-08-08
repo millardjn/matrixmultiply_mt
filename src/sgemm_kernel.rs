@@ -13,7 +13,7 @@ pub enum Gemm { }
 
 pub type T = f32;
 
-const MR: usize = 6;
+const MR: usize = 4;
 const NR: usize = 16;
 
 macro_rules! loopMR {
@@ -22,8 +22,8 @@ macro_rules! loopMR {
         let $i = 1; $e;
         let $i = 2; $e;
         let $i = 3; $e;
-        let $i = 4; $e;
-        let $i = 5; $e;
+//        let $i = 4; $e;
+//        let $i = 5; $e;
 //        let $i = 6; $e;
 //        let $i = 7; $e;
 
@@ -41,6 +41,7 @@ macro_rules! loopNR {
         let $i = 5; $e;
         let $i = 6; $e;
         let $i = 7; $e;
+        
         let $i = 8; $e;
         let $i = 9; $e;
         let $i = 10; $e;
@@ -49,6 +50,7 @@ macro_rules! loopNR {
         let $i = 13; $e;
         let $i = 14; $e;
         let $i = 15; $e;
+
 //        let $i = 16; $e;
 //        let $i = 17; $e;
 //        let $i = 18; $e;
@@ -85,7 +87,7 @@ impl GemmKernel for Gemm {
 
     #[inline(always)]
     fn nc() -> usize {
-        (archparam::S_NC + NR - 1) / NR * NR
+        ((archparam::S_NC + NR - 1) / NR) * NR
     }
     #[inline(always)]
     fn kc() -> usize {
@@ -93,7 +95,7 @@ impl GemmKernel for Gemm {
     }
     #[inline(always)]
     fn mc() -> usize {
-        (archparam::S_MC + MR - 1) / MR * MR
+        ((archparam::S_MC + MR - 1) / MR) * MR
     }
 
     #[inline(always)]
@@ -146,20 +148,14 @@ unsafe fn kernel_compute(k: usize, alpha: T, a: *const T, b: *const T, ab_: &mut
 	    let mut b = b;
 	
 	    // Compute matrix multiplication into ab[i][j]
-		
-	    for _ in 0..k {
-	    	
-	        // simple loop results in better register allocation than unroll
-	
-	        let mut v1 = [0.; NR];
-	        loopNR!(i, v1[i] = at(b, i));
-	        loopMR!(i, loopNR!(j, ab[i][j] += at(a, i) * v1[j]));
-	
+	    // Due to llvm/MIR update a temporary array is no longer needed for vectorisation, and unroll doesnt ruin register allocation
+		unroll_by_4!(k, {
+			loopMR!(i, loopNR!(j, ab[i][j] += at(a, i) * at(b, j)));
+			
 	        a = a.offset(MR as isize);
 	        b = b.offset(NR as isize);
-	
-	    }
-	
+		});
+	    
 	    loopMR!(i, loopNR!(j, ab[i][j] *= alpha));
 	
 	    *ab_ = ab;    	
