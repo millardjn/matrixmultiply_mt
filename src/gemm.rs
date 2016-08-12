@@ -158,9 +158,14 @@ unsafe fn gemm_loop<K>(m: usize,
     let kkc = K::kc();
     // let kmc = K::mc();
     // rough adaption, this can be improved to ensure each thread gets an equal number of chunks
-    let kmc = max(min((m + *NUM_CPUS - 1) / *NUM_CPUS, K::mc()),
-                  max(K::mc() / 2, K::mr()));
-    let num_threads = min((m + kmc - 1) / kmc, *NUM_CPUS);
+    // todo, might need to be fixed, does it preserve mc being a multiple of mr? ((archparam::S_MC + MR - 1) / MR) * MR
+    let kmc = ((max(
+			    	min((m + *NUM_CPUS - 1) / *NUM_CPUS, K::mc()),
+	                max(K::mc() / 2, K::mr())
+				)+ K::mr() - 1) / K::mr()) * K::mr();
+
+    let num_m_chunks = (m + kmc - 1) / kmc;
+    let num_threads = min(num_m_chunks, *NUM_CPUS);
     let pool_opt = if num_threads > 1 {
         THREAD_POOL.lock().ok()
     } else {
