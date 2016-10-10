@@ -15,6 +15,7 @@ use std::sync::{Mutex, Arc, Barrier};
 
 use std::cmp::{min, max};
 use std::mem::size_of;
+use std::mem::align_of;
 
 use util::range_chunk;
 use util::round_up_to;
@@ -67,8 +68,40 @@ pub unsafe fn sgemm(m: usize,
 		} else {
 			(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc)
 		};
-
-    gemm_loop::<sgemm_kernel::Gemm>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
+	
+	//println!("sgemm m:{} n:{}", m, n);
+	
+//	if n > sgemm_kernel::Gemm::nr() {
+		gemm_loop::<sgemm_kernel::Gemm>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
+//	} else {
+//		
+//		for mi in 0..m as isize{
+//			let c = c.offset(mi*rsc);			
+//			for ni in 0..n as isize{
+//				let c = c.offset(ni*csc);
+//				if beta.is_zero() {
+//					*c = 0.0;
+//				} else {
+//					*c *= beta
+//				}
+//			}
+//		}
+//		for ki in 0..k as isize {
+//			let a = a.offset(ki*csa);
+//			let b = b.offset(ki*rsb);
+//			for ni in 0..n as isize{
+//				let b = b.offset(ni*csb);
+//				let c = c.offset(ni*csc);
+//				for mi in 0..m as isize{
+//					let a = a.offset(mi*rsa);
+//					let c = c.offset(mi*rsc);			
+//
+//					*c += (*a)*(*b)*alpha;
+//				}
+//			}
+//		}
+//	}
+    
 
 	// if m*n < NR*NR then use naive 3loop multiply
 	
@@ -110,7 +143,7 @@ pub unsafe fn dgemm(m: usize,
 		} else {
 			(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc)
 		};    
-    
+		
     gemm_loop::<dgemm_kernel::Gemm>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
 }
 
@@ -128,10 +161,10 @@ fn ensure_kernel_params<K>()
     assert!(mr > 0);
     assert!(nr > 0);
     assert!(mr * nr <= MASK_SIZE);
-    assert!(K::align_to() <= 32);
-    // one row/col of the kernel is limiting the max align we can provide
-    let max_align = size_of::<K::Elem>() * min(mr, nr);
-    assert!(K::align_to() <= max_align);
+//    assert!(K::align_to() <= 32);
+//    // one row/col of the kernel is limiting the max align we can provide
+//    let max_align = size_of::<K::Elem>() * min(mr, nr);
+//    assert!(K::align_to() <= max_align);
 }
 
 /// Implement matrix multiply using packed buffers and a microkernel
@@ -173,13 +206,10 @@ unsafe fn gemm_loop<K>(m: usize,
     };
 
     ensure_kernel_params::<K>();
+	
 
-
-    let (mut packv, app_size) = packing_vec::<K>(m, k, n, num_threads);
-    let app_base = make_aligned_vec_ptr(K::align_to(), &mut packv);
-    let bpp = app_base.offset(app_size * num_threads as isize);
-
-
+    let (_vec , app_stride, app_base, bpp) = aligned_packing_vec::<K>(m, k, n, num_threads, K::align_to());
+    
     // LOOP 5: split n into nc parts
     for (l5, nc) in range_chunk(n, knc) {
         dprint!("LOOP 5, {}, nc={}", l5, nc);
@@ -200,7 +230,7 @@ unsafe fn gemm_loop<K>(m: usize,
 
             // Need a struct to smuggle pointers across threads. ugh!
             struct Ptrs<K: GemmKernel> {
-                app_base: *mut K::Elem,
+                app: *mut K::Elem,
                 bpp: *mut K::Elem,
                 a: *const K::Elem,
                 c: *mut K::Elem,
@@ -211,7 +241,7 @@ unsafe fn gemm_loop<K>(m: usize,
             for cpu_id in 0..num_threads {
 
                 let p = Ptrs::<K> {
-                    app_base: app_base,
+                    app: app_base.offset(app_stride * cpu_id as isize),
                     bpp: bpp,
                     a: a,
                     c: c,
@@ -220,7 +250,7 @@ unsafe fn gemm_loop<K>(m: usize,
 
                 let work = move || {
                     let bpp = p.bpp;
-                    let app = p.app_base.offset(app_size * cpu_id as isize);
+                    let app = p.app;
                     let a = p.a;
                     let c = p.c;
 
@@ -301,16 +331,13 @@ unsafe fn gemm_packed<K>(nc: usize,
             let app = app.stride_offset(1, kc * mr * l1);
             let c = c.stride_offset(rsc, mr * l1);
 
-            // 			if beta.is_zero() {
-            // 				zero_block::<K>(mr_, nr_, c, rsc, csc);
-            // 			} else if ! beta.is_one(){
-            // 				scale_block::<K>(beta, mr_, nr_, c, rsc, csc);
-            // 			}
-
+//			if beta.is_zero() {
+//				zero_block::<K>(mr_, nr_, c, rsc, csc);
+//			} else if ! beta.is_one(){
+//				scale_block::<K>(beta, mr_, nr_, c, rsc, csc);
+//			}
 
             // GEMM KERNEL
-            // NOTE: For the rust kernels, it performs better to simply
-            // always use the masked kernel function!
             if K::always_masked() || nr_ < nr || mr_ < mr {
                 masked_kernel::<_, K>(kc, alpha, &*app, &*bpp, &mut *c, rsc, csc, mr_, nr_);
             } else {
@@ -361,21 +388,21 @@ unsafe fn zero_block<K: GemmKernel>(rows: usize,
         for col in 0..cols {
             for row in 0..rows {
                 let cptr = c.offset(1 * row as isize + csc * col as isize);
-                *cptr = K::Elem::zero(); // initialize C
+                *cptr = K::Elem::zero();
             }
         }
     } else if csc == 1 {
         for row in 0..rows {
             for col in 0..cols {
                 let cptr = c.offset(rsc * row as isize + 1 * col as isize);
-                *cptr = K::Elem::zero(); // initialize C
+                *cptr = K::Elem::zero();
             }
         }
     } else {
         for col in 0..cols {
             for row in 0..rows {
                 let cptr = c.offset(rsc * row as isize + csc * col as isize);
-                *cptr = K::Elem::zero(); // initialize C
+                *cptr = K::Elem::zero();
             }
         }
     }
@@ -383,13 +410,13 @@ unsafe fn zero_block<K: GemmKernel>(rows: usize,
 
 /// Allocate a vector of uninitialized data to be used for both packing buffers.
 ///
-/// + A~ needs be KC x MC
+/// + A~ needs be KC x MC x num_a
 /// + B~ needs be KC x NC
 /// but we can make them smaller if the matrix is smaller than this (just ensure
 /// we have rounded up to a multiple of the kernel size).
 ///
-/// Return packing vector and offset to start of b
-unsafe fn packing_vec<K>(m: usize, k: usize, n: usize, num_a: usize) -> (Vec<K::Elem>, isize)
+/// Return packing vector, stride between of each app region, aligned pointer to start of first app, and aligned pointer to start of b
+unsafe fn aligned_packing_vec<K>(m: usize, k: usize, n: usize, num_a: usize, align_to: usize) -> (Vec<K::Elem>, isize, *mut K::Elem, *mut K::Elem,)
     where K: GemmKernel
 {
     let m = min(m, K::mc());
@@ -397,11 +424,23 @@ unsafe fn packing_vec<K>(m: usize, k: usize, n: usize, num_a: usize) -> (Vec<K::
     let n = min(n, K::nc());
     // round up k, n to multiples of mr, nr
     // round up to multiple of kc
+    
+    debug_assert!(align_to % size_of::<K::Elem>() == 0);
+    debug_assert!(align_to % align_of::<K::Elem>() == 0);
+    
+    let align_elems = align_to / size_of::<K::Elem>();
+
     let apack_size = k * round_up_to(m, K::mr());
     let bpack_size = k * round_up_to(n, K::nr());
-    let nelem = apack_size * num_a + bpack_size;
+
+    let align1 = align_elems; // give room to let a_ptr be aligned
+    let align2 = if align_elems == 0 {0} else {round_up_to(apack_size, align_elems) - apack_size}; // pad end of apack zone so next region is also cache-aligned
+    let nelem = align1 + (apack_size + align2) * num_a + bpack_size;
+    
     let mut v = Vec::with_capacity(nelem);
     v.set_len(nelem);
+    
+    
     dprint!("packed nelem={}, apack={}, bpack={},
              m={} k={} n={}",
             nelem,
@@ -410,35 +449,45 @@ unsafe fn packing_vec<K>(m: usize, k: usize, n: usize, num_a: usize) -> (Vec<K::
             m,
             k,
             n);
-    // max alignment requirement is a multiple of min(MR, NR) * sizeof<Elem>
-    // because apack_size is a multiple of MR, start of b aligns fine
-    (v, apack_size as isize)
+
+    
+    let mut a_ptr = v.as_mut_ptr();
+    if align_to != 0 {
+        let cur_align = a_ptr as usize % align_to;
+        if cur_align != 0 {
+            a_ptr = a_ptr.offset(((align_to - cur_align) / size_of::<K::Elem>()) as isize);
+        }
+    }
+    
+    let b_ptr = a_ptr.offset(((apack_size + align2)*num_a) as isize);
+    
+    (v, (apack_size + align2) as isize, a_ptr, b_ptr)
 }
 
 /// Align a pointer into the vec. Will reallocate to fit & shift the pointer
 /// forwards if needed. This invalidates any previous pointers into the v.
-unsafe fn make_aligned_vec_ptr<U>(align_to: usize, v: &mut Vec<U>) -> *mut U {
-    let mut ptr = v.as_mut_ptr();
-    if align_to != 0 {
-        if v.as_ptr() as usize % align_to != 0 {
-            let cap = v.capacity();
-            v.reserve_exact(cap + align_to / size_of::<U>() - 1);
-            ptr = align_ptr(align_to, v.as_mut_ptr());
-        }
-    }
-    ptr
-}
+//unsafe fn make_aligned_vec_ptr<U>(align_to: usize, v: &mut Vec<U>) -> *mut U {
+//    let mut ptr = v.as_mut_ptr();
+//    if align_to != 0 {
+//        if v.as_ptr() as usize % align_to != 0 {
+//            let cap = v.capacity();
+//            v.reserve_exact(cap + align_to / size_of::<U>() - 1);
+//            ptr = align_ptr(align_to, v.as_mut_ptr());
+//        }
+//    }
+//    ptr
+//}
 
 /// offset the ptr forwards to align to a specific byte count
-unsafe fn align_ptr<U>(align_to: usize, mut ptr: *mut U) -> *mut U {
-    if align_to != 0 {
-        let cur_align = ptr as usize % align_to;
-        if cur_align != 0 {
-            ptr = ptr.offset(((align_to - cur_align) / size_of::<U>()) as isize);
-        }
-    }
-    ptr
-}
+//unsafe fn align_ptr<U>(align_to: usize, mut ptr: *mut U) -> *mut U {
+//    if align_to != 0 {
+//        let cur_align = ptr as usize % align_to;
+//        if cur_align != 0 {
+//            ptr = ptr.offset(((align_to - cur_align) / size_of::<U>()) as isize);
+//        }
+//    }
+//    ptr
+//}
 
 /// Pack matrix into `pack`
 ///

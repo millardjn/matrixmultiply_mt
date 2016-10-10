@@ -6,15 +6,18 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+
 use kernel::GemmKernel;
 use archparam;
+
 
 pub enum Gemm { }
 
 pub type T = f32;
 
-const MR: usize = 4;
-const NR: usize = 16;
+// 16x4 seems fastest for large matrices but worse for small
+const MR: usize = 8;
+const NR: usize = 8;
 
 macro_rules! loopMR {
     ($i:ident, $e:expr) => {{
@@ -22,10 +25,10 @@ macro_rules! loopMR {
         let $i = 1; $e;
         let $i = 2; $e;
         let $i = 3; $e;
-//        let $i = 4; $e;
-//        let $i = 5; $e;
-//        let $i = 6; $e;
-//        let $i = 7; $e;
+        let $i = 4; $e;
+        let $i = 5; $e;
+        let $i = 6; $e;
+        let $i = 7; $e;
 
         assert!($i == MR -1);
     }}
@@ -42,14 +45,14 @@ macro_rules! loopNR {
         let $i = 6; $e;
         let $i = 7; $e;
         
-        let $i = 8; $e;
-        let $i = 9; $e;
-        let $i = 10; $e;
-        let $i = 11; $e;
-        let $i = 12; $e;
-        let $i = 13; $e;
-        let $i = 14; $e;
-        let $i = 15; $e;
+    //    let $i = 8; $e;
+    //    let $i = 9; $e;
+    //    let $i = 10; $e;
+    //    let $i = 11; $e;
+    //    let $i = 12; $e;
+    //    let $i = 13; $e;
+    //    let $i = 14; $e;
+    //    let $i = 15; $e;
 
 //        let $i = 16; $e;
 //        let $i = 17; $e;
@@ -68,7 +71,7 @@ impl GemmKernel for Gemm {
 
     #[inline(always)]
     fn align_to() -> usize {
-        0
+        32
     }
 
     #[inline(always)]
@@ -130,50 +133,73 @@ pub unsafe fn kernel(k: usize,
                      c: *mut T,
                      rsc: isize,
                      csc: isize) {
-    let mut ab = [[0.; NR]; MR];
+	
+	if k > 0{
+	    let mut ab = [[0.; NR]; MR];
+	
+	    kernel_compute(k, alpha, a, b, &mut ab);
+	
+	    kernel_write(c, rsc, csc, &ab);		
+	}
 
-    kernel_compute(k, alpha, a, b, &mut ab);
-
-    kernel_write(c, rsc, csc, &ab);
 
 }
+
 
 /// Split out compute for better vectorisation
-#[inline(never)]
+#[inline(always)]
 unsafe fn kernel_compute(k: usize, alpha: T, a: *const T, b: *const T, ab_: &mut [[T; NR]; MR]) {
-    if k > 0 {
-	    let mut ab = *ab_;
-	    loopMR!(i, loopNR!(j, ab[i][j] = 0.0)); // this removes the loads from stack, and xorps the registers
-	    let mut a = a;
-	    let mut b = b;
+
+	let mut ab = *ab_;
 	
-	    // Compute matrix multiplication into ab[i][j]
-	    // Due to llvm/MIR update a temporary array is no longer needed for vectorisation, and unroll doesnt ruin register allocation
-		unroll_by_4!(k, {
-			loopMR!(i, loopNR!(j, ab[i][j] += at(a, i) * at(b, j)));
-			
-	        a = a.offset(MR as isize);
-	        b = b.offset(NR as isize);
+	let mut a = a;
+	let mut b = b;
+
+	// Compute matrix multiplication into ab[i][j]
+	// Due to llvm/MIR update a temporary array is no longer needed for vectorisation, and unroll doesnt ruin register allocation
+	loopMR!(i, loopNR!(j, ab[i][j] = 0.0)); // this removes the loads from stack, and xorps the registers
+	unroll_by_4!(k, {
+
+		loopMR!(i,{
+
+			loopNR!(j,{
+				ab[i][j] += at(a, i) * at(b, j);
+                //ab[i][j] = at(a, i).mul_add(at(b, j) , ab[i][j]);
+			});
 		});
-	    
-	    loopMR!(i, loopNR!(j, ab[i][j] *= alpha));
+
+        a = a.offset(MR as isize);
+        b = b.offset(NR as isize);		
+    });
 	
-	    *ab_ = ab;    	
-    }
+	loopMR!(i, loopNR!(j, ab[i][j] *= alpha));
+    *ab_ = ab;
+
 }
 
+
+
+
 /// Choose writes to C in a cache/vectorisation friendly manner
-#[inline(always)]
+#[inline(never)]
 unsafe fn kernel_write(c: *mut T, rsc: isize, csc: isize, ab: &[[T; NR]; MR]) {
 
     if rsc == 1 {
-        for j in 0..NR {
-            loopMR!(i, *c.offset(1 * i as isize + csc * j as isize) += ab[i][j]);
-        }
+//        for j in 0..NR {
+//            loopMR!(i, *c.offset(1 * i as isize + csc * j as isize) += ab[i][j]);
+//        }
+        loopNR!(j,
+        	loopMR!(i, *c.offset(1 * i as isize + csc * j as isize) += ab[i][j])
+        );
+        
     } else if csc == 1 {
-        for i in 0..MR {
-            loopNR!(j, *c.offset(rsc * i as isize + 1 * j as isize) += ab[i][j]);
-        }
+//      for i in 0..MR {
+//          loopNR!(j, *c.offset(rsc * i as isize + 1 * j as isize) += ab[i][j]);
+//      }
+        loopMR!(i,
+        	loopNR!(j, *c.offset(rsc * i as isize + 1 * j as isize) += ab[i][j])
+        );
+        
     } else {
         for i in 0..MR {
             for j in 0..NR {
