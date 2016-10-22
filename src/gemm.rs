@@ -11,8 +11,8 @@ extern crate num_cpus;
 extern crate threadpool;
 
 use threadpool::ThreadPool;
-use std::sync::{Mutex, Arc, Barrier};
-
+use std::sync::{Condvar, Mutex};
+use std::sync::atomic::{Ordering, AtomicUsize};
 use std::cmp::{min, max};
 use std::mem::size_of;
 use std::mem::align_of;
@@ -239,66 +239,99 @@ unsafe fn gemm_loop<K>(m: usize,
             // Pack B -> B~
             pack(kc, nc, K::nr(), bpp, b, csb, rsb);
 
-            // Need a struct to smuggle pointers across threads. ugh!
-            struct Ptrs<K: GemmKernel> {
-                app: *mut K::Elem,
-                bpp: *mut K::Elem,
-                a: *const K::Elem,
-                c: *mut K::Elem,
-            }
-            unsafe impl<K: GemmKernel> Send for Ptrs<K> {}
+            if let (Some(pool), true) = (pool_opt.as_ref(), num_threads > 1) {
+                // Need a struct to smuggle pointers across threads. ugh!
+                struct Ptrs<K: GemmKernel> {
+                    app: *mut K::Elem,
+                    bpp: *mut K::Elem,
+                    a: *const K::Elem,
+                    c: *mut K::Elem,
+                    pair: *mut (Mutex<bool>, Condvar, AtomicUsize),
+                }
+                unsafe impl<K: GemmKernel> Send for Ptrs<K> {}
 
-            let barrier = Arc::new(Barrier::new(num_threads));
-            for cpu_id in 0..num_threads {
+                let mut pair = (Mutex::new(false), Condvar::new(), AtomicUsize::new(num_threads));    
 
-                let p = Ptrs::<K> {
-                    app: app_base.offset(app_stride * cpu_id as isize),
-                    bpp: bpp,
-                    a: a,
-                    c: c,
-                };
-                let barrier = barrier.clone();
+                for cpu_id in 0..num_threads {
+                    let p = Ptrs::<K> {
+                        app: app_base.offset(app_stride * cpu_id as isize),
+                        bpp: bpp,
+                        a: a,
+                        c: c,
+                        pair: &mut pair as *mut _,
+                    };
 
-                let work = move || {
-                    let bpp = p.bpp;
-                    let app = p.app;
-                    let a = p.a;
-                    let c = p.c;
+                    pool.execute(move || {
+                        let bpp = p.bpp;
+                        let app = p.app;
+                        let a = p.a;
+                        let c = p.c;
+                        let &mut(ref lock, ref cvar, ref counter) = p.pair.as_mut().unwrap();
 
 
-                    // LOOP 3: split m into mc parts
-                    for (l3, mc) in range_chunk(m, kmc) {
-                        if l3 % num_threads != cpu_id {
-                            continue;
-                        } // threads leapfrog each other
+                        // LOOP 3: split m into mc parts
+                        for (l3, mc) in range_chunk(m, kmc) {
+                            if l3 % num_threads != cpu_id {
+                                continue;
+                            } // threads leapfrog each other
 
-                        dprint!("LOOP 3, {}, mc={}", l3, mc);
-                        let a = a.stride_offset(rsa, kmc * l3);
-                        let c = c.stride_offset(rsc, kmc * l3);
+                            dprint!("LOOP 3, {}, mc={}", l3, mc);
+                            let a = a.stride_offset(rsa, kmc * l3);
+                            let c = c.stride_offset(rsc, kmc * l3);
 
-                        // Pack A -> A~
-                        pack(kc, mc, K::mr(), app, a, rsa, csa);
+                            // Pack A -> A~
+                            pack(kc, mc, K::mr(), app, a, rsa, csa);
 
-                        // First time writing to C, use user's `beta`, else accumulate
-                        let betap = if l4 == 0 {
-                            beta
-                        } else {
-                            <_>::one()
-                        };
+                            // First time writing to C, use user's `beta`, else accumulate
+                            let betap = if l4 == 0 {
+                                beta
+                            } else {
+                                <_>::one()
+                            };
 
-                        // LOOP 2 and 1
-                        gemm_packed::<K>(nc, kc, mc, alpha, app, bpp, betap, c, rsc, csc);
-                    }
-                    barrier.wait();
-                };
+                            // LOOP 2 and 1
+                            gemm_packed::<K>(nc, kc, mc, alpha, app, bpp, betap, c, rsc, csc);
+                        }
 
-                if let (Some(pool), true) = (pool_opt.as_ref(), cpu_id < num_threads - 1) {
-                    pool.execute(work);
-                } else {
-                    work();
+                        let x = counter.fetch_sub(1, Ordering::Relaxed);
+                        if x == 1 {
+                            *lock.lock().unwrap() = true;
+                            cvar.notify_one();
+                        }
+
+                    });
+                  
                 }
 
+                let &(ref lock, ref cvar, _) = &pair;
+                let mut started = lock.lock().unwrap();
+                while !*started {
+                    started = cvar.wait(started).unwrap();
+                }
+
+            } else {
+                let app = app_base;
+                for (l3, mc) in range_chunk(m, kmc) {
+
+                    dprint!("LOOP 3, {}, mc={}", l3, mc);
+                    let a = a.stride_offset(rsa, kmc * l3);
+                    let c = c.stride_offset(rsc, kmc * l3);
+
+                    // Pack A -> A~
+                    pack(kc, mc, K::mr(), app, a, rsa, csa);
+
+                    // First time writing to C, use user's `beta`, else accumulate
+                    let betap = if l4 == 0 {
+                        beta
+                    } else {
+                        <_>::one()
+                    };
+
+                    // LOOP 2 and 1
+                    gemm_packed::<K>(nc, kc, mc, alpha, app, bpp, betap, c, rsc, csc);
+                }
             }
+
         }
     }
 }
