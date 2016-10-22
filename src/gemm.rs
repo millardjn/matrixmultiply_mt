@@ -22,9 +22,12 @@ use util::round_up_to;
 
 use kernel::GemmKernel;
 use kernel::Element;
-use sgemm_kernel;
+//use sgemm_kernel;
 use dgemm_kernel;
 use pointer::PointerExt;
+
+use unroll::*;
+use tuneable_sgemm;
 
 lazy_static! {
 	static ref NUM_CPUS: usize = num_cpus::get();
@@ -69,38 +72,46 @@ pub unsafe fn sgemm(m: usize,
 			(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc)
 		};
 	
-	//println!("sgemm m:{} n:{}", m, n);
 	
-//	if n > sgemm_kernel::Gemm::nr() {
-		gemm_loop::<sgemm_kernel::Gemm>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
-//	} else {
-//		
-//		for mi in 0..m as isize{
-//			let c = c.offset(mi*rsc);			
-//			for ni in 0..n as isize{
-//				let c = c.offset(ni*csc);
-//				if beta.is_zero() {
-//					*c = 0.0;
-//				} else {
-//					*c *= beta
-//				}
-//			}
-//		}
-//		for ki in 0..k as isize {
-//			let a = a.offset(ki*csa);
-//			let b = b.offset(ki*rsb);
-//			for ni in 0..n as isize{
-//				let b = b.offset(ni*csb);
-//				let c = c.offset(ni*csc);
-//				for mi in 0..m as isize{
-//					let a = a.offset(mi*rsa);
-//					let c = c.offset(mi*rsc);			
-//
-//					*c += (*a)*(*b)*alpha;
-//				}
-//			}
-//		}
-//	}
+    type NR = Unroll8<f32>;
+    type MR = Unroll8<NR>;
+
+	if n >= NR::val() || k >= NR::val() {
+
+        gemm_loop::<tuneable_sgemm::Gemm<MR, NR>>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
+
+		//gemm_loop::<sgemm_kernel::Gemm>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
+	} else {
+		
+		for mi in 0..m as isize{
+			let c = c.offset(mi*rsc);			
+			for ni in 0..n as isize{
+				let c = c.offset(ni*csc);
+				if beta.is_zero() {
+					*c = 0.0;
+				} else {
+					*c *= beta
+				}
+			}
+		}
+
+        for mi in 0..m as isize{
+            let a = a.offset(mi*rsa);
+            let c = c.offset(mi*rsc);	
+            for ni in 0..n as isize{
+                let b = b.offset(ni*csb);
+                let c = c.offset(ni*csc);
+                for ki in 0..k as isize {
+                    let a = a.offset(ki*csa);
+                    let b = b.offset(ki*rsb);
+
+					*c += (*a)*(*b)*alpha;
+				}
+			}
+		}
+
+
+	}
     
 
 	// if m*n < NR*NR then use naive 3loop multiply
@@ -331,12 +342,6 @@ unsafe fn gemm_packed<K>(nc: usize,
             let app = app.stride_offset(1, kc * mr * l1);
             let c = c.stride_offset(rsc, mr * l1);
 
-//			if beta.is_zero() {
-//				zero_block::<K>(mr_, nr_, c, rsc, csc);
-//			} else if ! beta.is_one(){
-//				scale_block::<K>(beta, mr_, nr_, c, rsc, csc);
-//			}
-
             // GEMM KERNEL
             if K::always_masked() || nr_ < nr || mr_ < mr {
                 masked_kernel::<_, K>(kc, alpha, &*app, &*bpp, &mut *c, rsc, csc, mr_, nr_);
@@ -347,6 +352,7 @@ unsafe fn gemm_packed<K>(nc: usize,
     }
 }
 
+#[inline(never)]
 unsafe fn scale_block<K: GemmKernel>(beta: K::Elem,
                                      rows: usize,
                                      cols: usize,
@@ -408,7 +414,7 @@ unsafe fn zero_block<K: GemmKernel>(rows: usize,
     }
 }
 
-/// Allocate a vector of uninitialized data to be used for both packing buffers.
+/// Allocate a vector of uninitialized data to be used for B~ and multiple A~ packing buffers.
 ///
 /// + A~ needs be KC x MC x num_a
 /// + B~ needs be KC x NC
@@ -433,8 +439,8 @@ unsafe fn aligned_packing_vec<K>(m: usize, k: usize, n: usize, num_a: usize, ali
     let apack_size = k * round_up_to(m, K::mr());
     let bpack_size = k * round_up_to(n, K::nr());
 
-    let align1 = align_elems; // give room to let a_ptr be aligned
-    let align2 = if align_elems == 0 {0} else {round_up_to(apack_size, align_elems) - apack_size}; // pad end of apack zone so next region is also cache-aligned
+    let align1 = align_elems; // give room to let first A~ be aligned
+    let align2 = if align_elems == 0 {0} else {round_up_to(apack_size, align_elems) - apack_size}; // room after each A~ to keep next section aligned
     let nelem = align1 + (apack_size + align2) * num_a + bpack_size;
     
     let mut v = Vec::with_capacity(nelem);
@@ -464,30 +470,7 @@ unsafe fn aligned_packing_vec<K>(m: usize, k: usize, n: usize, num_a: usize, ali
     (v, (apack_size + align2) as isize, a_ptr, b_ptr)
 }
 
-/// Align a pointer into the vec. Will reallocate to fit & shift the pointer
-/// forwards if needed. This invalidates any previous pointers into the v.
-//unsafe fn make_aligned_vec_ptr<U>(align_to: usize, v: &mut Vec<U>) -> *mut U {
-//    let mut ptr = v.as_mut_ptr();
-//    if align_to != 0 {
-//        if v.as_ptr() as usize % align_to != 0 {
-//            let cap = v.capacity();
-//            v.reserve_exact(cap + align_to / size_of::<U>() - 1);
-//            ptr = align_ptr(align_to, v.as_mut_ptr());
-//        }
-//    }
-//    ptr
-//}
 
-/// offset the ptr forwards to align to a specific byte count
-//unsafe fn align_ptr<U>(align_to: usize, mut ptr: *mut U) -> *mut U {
-//    if align_to != 0 {
-//        let cur_align = ptr as usize % align_to;
-//        if cur_align != 0 {
-//            ptr = ptr.offset(((align_to - cur_align) / size_of::<U>()) as isize);
-//        }
-//    }
-//    ptr
-//}
 
 /// Pack matrix into `pack`
 ///
@@ -506,17 +489,33 @@ unsafe fn pack<T>(kc: usize,
                   csa: isize)
     where T: Element
 {
-    let mut pack = pack;
-    for ir in 0..mc / mr {
-        let row_offset = ir * mr;
-        for j in 0..kc {
-            for i in 0..mr {
-                *pack = *a.stride_offset(rsa, i + row_offset)
-                          .stride_offset(csa, j);
-                pack.inc();
-            }
+    
+
+    //if rsa == 1 || csa == 1 {
+    //    vec_pack(kc,mc,mr,pack,a,rsa,csa);
+    //} else {
+        for ir in 0..mc / mr {
+            let a = a.stride_offset(rsa, ir * mr);
+            let pack = pack.offset((ir * mr * kc) as isize);
+
+            
+            let mut j = 0;
+            unroll_by_4!(kc, {
+                let mut i = 0;
+                unroll_by_4!(mr, {
+                    let pack = pack.offset((j*mr+i)as isize);
+                    *pack = *a.stride_offset(rsa, i)
+                            .stride_offset(csa, j);
+                    i+=1;        
+                });  
+                j+=1;
+            });    
+
         }
-    }
+    //}
+
+
+    let mut pack = pack.offset(((mc/mr)*mr*kc) as isize);
 
     let zero = <_>::zero();
 
@@ -537,6 +536,109 @@ unsafe fn pack<T>(kc: usize,
         }
     }
 }
+
+/// Partial Pack matrix into `pack`
+/// try and get llvm to generate simd 4x4 transpose code. Not currently working.
+/// panics if neither csa==1 or rsa==1
+#[allow(dead_code)]
+#[allow(unused_assignments)]
+unsafe fn vec_pack<T>(kc: usize,
+                  mc: usize,
+                  mr: usize,
+                  pack: *mut T,
+                  a: *const T,
+                  rsa: isize,
+                  csa: isize)
+    where T: Element
+{
+
+    if csa == 1 {
+        for ir in 0..mc / mr {
+            let a = a.stride_offset(rsa, ir * mr);
+            let pack = pack.offset((ir * mr * kc) as isize);
+
+            for jo in 0..kc/4 {
+               
+                for io in 0..mr/4{
+                    let mut pack = pack.offset(((jo*4)*mr+io*4)as isize);
+                    let mut a = a.stride_offset(rsa, io*4).stride_offset(csa, jo*4);
+                    let zero = <_>::zero();
+                    let mut temp = [[zero;4];4];
+                
+                    loop4! (i, {
+                        loop4! (j, {
+                        
+                            temp[j][i] = *a.offset(j as isize);
+                        });
+                        a = a.offset(rsa);
+                    });
+
+                    loop4! (j, {
+                        loop4! (i, {
+                            *pack.offset(i as isize) = temp[j][i];
+                        });
+                        pack = pack.offset(mr as isize);
+                    });
+
+                }
+                
+                for i in (mr/4)*4..mr{
+                    let pack = pack.offset((jo*4*mr+i)as isize);
+                    *pack = *a.stride_offset(rsa, i)
+                            .stride_offset(csa, jo*4);
+                }
+            }
+
+            for j in (kc/4)*4..kc {
+                for i in 0..mr {
+                    let pack = pack.offset((j*mr+i)as isize);
+                    *pack = *a.stride_offset(rsa, i)
+                            .stride_offset(csa, j);
+                }         
+            }
+        }
+    } else if rsa == 1 {
+        for ir in 0..mc / mr {
+            let a = a.stride_offset(rsa, ir * mr);
+            let pack = pack.offset((ir * mr * kc) as isize);
+
+            for jo in 0..kc/4 {
+
+                for io in 0..mr/4{
+                    let mut pack = pack.offset(((jo*4)*mr+io*4)as isize);
+                    let mut a = a.stride_offset(rsa, io*4).stride_offset(csa, jo*4);
+
+                    loop4! (_j, {
+                        loop4! (i, {
+                            *pack.offset(i) = *a.offset(i);
+                        });
+                        pack = pack.offset(mr as isize);
+                        a = a.offset(csa);
+                    });
+
+                }
+                for i in (mr/4)*4..mr{
+                    let pack = pack.offset((jo*4*mr+i)as isize);
+                    *pack = *a.stride_offset(rsa, i)
+                            .stride_offset(csa, jo*4);
+                }
+            }
+
+            for j in (kc/4)*4..kc {
+                for i in 0..mr {
+                    let pack = pack.offset((j*mr+i)as isize);
+                    *pack = *a.stride_offset(rsa, i)
+                            .stride_offset(csa, j);
+                }         
+            }
+        }
+    } else {
+        unreachable!("either csa or rsa must equal 1");
+    }
+
+}
+
+
 
 /// Call the GEMM kernel with a "masked" output C.
 ///

@@ -60,6 +60,8 @@ mod sgemm_kernel;
 mod dgemm_kernel;
 mod pointer;
 mod util;
+mod unroll;
+mod tuneable_sgemm;
 
 pub use gemm::sgemm;
 pub use gemm::dgemm;
