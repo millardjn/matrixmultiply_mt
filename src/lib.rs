@@ -1,4 +1,5 @@
-// Copyright 2016 bluss
+// Original work Copyright 2016 bluss
+// Modified work Copyright 2016 J. Millard.
 //
 // Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
 // http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
@@ -13,8 +14,7 @@
 //! Uses the same microkernel algorithm as [BLIS][bl], but in a much simpler
 //! and less featureful implementation.
 //! See their [multithreading][mt] page for a very good diagram over how
-//! the algorithm partitions the matrix (*Note:* this crate does not implement
-//! multithreading).
+//! the algorithm partitions the matrix (*Note:* this crate implements multithreading of BLIS Loop 3).
 //! 
 //! [bl]: https://github.com/flame/blis
 //! 
@@ -48,20 +48,24 @@
 //! Stides can be negative or even zero, but for a mutable matrix elements
 //! may not alias each other.
 
+extern crate typenum_loops;
+extern crate typenum;
+extern crate generic_array;
+extern crate num;
+
+
 extern crate threadpool;
 #[macro_use] extern crate lazy_static;
 
 #[macro_use] mod debugmacros;
-#[macro_use] mod loopmacros;
-mod archparam;
-mod kernel;
+
+
+mod generic_params;
+mod generic_kernel;
 mod gemm;
-mod sgemm_kernel;
-mod dgemm_kernel;
+
 mod pointer;
 mod util;
-mod unroll;
-mod tuneable_sgemm;
 
 pub use gemm::sgemm;
 pub use gemm::dgemm;
