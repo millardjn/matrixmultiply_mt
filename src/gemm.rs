@@ -66,50 +66,7 @@ pub unsafe fn sgemm(m: usize,
 					rsc: isize,
 					csc: isize) {
 
-	// Flip matrix multiply to make maximise multithreading
-	let (m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc) = if n > m {
-			(n, k, m, b, csb, rsb, a, csa, rsa, c, csc, rsc)
-		} else {
-			(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc)
-		};
-
-
-
-	if n >= <SgemmKernelAVX as KernelConfig>::NR::to_usize() || k >= <SgemmKernelAVX as KernelConfig>::NR::to_usize() {
-		gemm_loop::<SgemmCache, SgemmKernelAVX>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
-	} else {
-		// Each case for for row stride or col stride == 1 should be special cased.
-		// Currently only very small matricies are handled here, eventually thin matrices (low reuse) should be too.
-
-		for mi in 0..m as isize{
-			let c = c.offset(mi*rsc);			
-			for ni in 0..n as isize{
-				let c = c.offset(ni*csc);
-				if beta.is_zero() {
-					*c = 0.0;
-				} else {
-					*c *= beta
-				}
-			}
-		}
-
-		for mi in 0..m as isize{
-			let a = a.offset(mi*rsa);
-			let c = c.offset(mi*rsc);	
-			for ni in 0..n as isize{
-				let b = b.offset(ni*csb);
-				let c = c.offset(ni*csc);
-				for ki in 0..k as isize {
-					let a = a.offset(ki*csa);
-					let b = b.offset(ki*rsb);
-					*c += (*a)*(*b)*alpha;
-				}
-			}
-		}
-
-
-	}
-
+	gemm::<SgemmCache, SgemmKernelAVX>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
 
 }
 
@@ -143,20 +100,96 @@ pub unsafe fn dgemm(m: usize,
 					c: *mut f64,
 					rsc: isize,
 					csc: isize) {
-	// Flip matrix multiply to make maximise multithreading
-	let (m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc) = if n > m {
-			(n, k, m, b, csb, rsb, a, csa, rsa, c, csc, rsc)
-		} else {
-			(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc)
-		};    
 
-	gemm_loop::<DgemmCache, DgemmKernelAVX>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
+	gemm::<DgemmCache, DgemmKernelAVX>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
 }
 
+/// General matrix multiplication (f64|f32)
+/// The type parameter `K` is the gemm microkernel configuration.
+/// The type parameter `C` is the outer gemm cache blocking configuration.
 
+/// C ← α A B + β C
+///
+/// + m, k, n: dimensions
+/// + a, b, c: pointer to the first element in the matrix
+/// + A: m by k matrix
+/// + B: k by n matrix
+/// + C: m by n matrix
+/// + rs<em>x</em>: row stride of *x*
+/// + cs<em>x</em>: col stride of *x*
+///
+/// Strides for A and B may be arbitrary. Strides for C must not result in
+/// elements that alias each other, for example they can not be zero.
+///
+/// If β is zero, then C does not need to be initialized.
+pub unsafe fn gemm<C: CacheConfig, K: KernelConfig>(m: usize,
+					   k: usize,
+					   n: usize,
+					   alpha: K::T,
+					   a: *const K::T,
+					   rsa: isize,
+					   csa: isize,
+					   b: *const K::T,
+					   rsb: isize,
+					   csb: isize,
+					   beta: K::T,
+					   c: *mut K::T,
+					   rsc: isize,
+					   csc: isize)
+{
 
-/// Implement matrix multiply using packed buffers and a microkernel
-/// strategy, the type parameter `K` is the gemm microkernel.
+	if m >= K::NR::to_usize() || n >= K::NR::to_usize() || k >= K::NR::to_usize() {
+		let (same_threads, _) = get_num_threads_and_mc(m, K::MR::to_usize(), C::MC::to_usize());
+		let (flip_threads, _) = get_num_threads_and_mc(n, K::MR::to_usize(), C::MC::to_usize());
+
+		// Flip matrix multiply to make maximise multithreadingon rectangular C, otherwise flip if it makes iteration over C more cache friendly
+		// Tradeoff between multithreading and iteration order could be made more intelligently, such as, if max cores already available, then choose to optimise access patterns.
+		let (m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc) = if flip_threads > same_threads || (flip_threads == same_threads && rsc.abs() < csc.abs()) {
+				(n, k, m, b, csb, rsb, a, csa, rsa, c, csc, rsc)
+			} else {
+				(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc)
+			};
+		gemm_loop::<C, K>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
+	} else {
+		// Each case for for row stride or col stride == 1 should be special cased.
+		// Currently only very small matricies are handled here, eventually thin matrices (low reuse) should be too.
+		if beta.is_zero() {
+			for i in 0..m as isize {
+				for j in 0..n as isize {
+					let celt = c.offset((i * rsc + j*csc) );
+					*celt = (0..k as isize).fold(K::T::zero(),
+						move |s, x| s + *a.offset(i * rsa + x * csa) * *b.offset(x * rsb + j * csb) * alpha);
+				}
+			}
+		} else {
+			for i in 0..m as isize {
+				for j in 0..n as isize {
+					let celt = c.offset((i * rsc + j*csc) );
+					*celt = (0..k as isize).fold(*celt*beta,
+						move |s, x| s + *a.offset(i * rsa + x * csa) * *b.offset(x * rsb + j * csb) * alpha);
+				}
+			}
+		}
+	}
+}
+
+/// rough adaption to split M direction over multiple CPUS if the work units wont be too small
+/// this could be improved to ensure each thread gets an equal number of chunks
+/// Rules: Don't go over cmc_, dont go under cmc_*2/3, stay divisible by kmr
+fn get_num_threads_and_mc(m: usize, mr: usize, mc: usize) -> (usize, usize){
+	let cmc_ = ((max( /// Take the max of either:
+					min((m + *NUM_CPUS - 1) / *NUM_CPUS, mc), // 1. The min of round_up(m/numcpus) or the default cmc
+					max((mc*2)/3, mr) // 2. The max of half the default cmc, or the kernel size in the m direction
+				)+ mr - 1) / mr) * mr; // Then round up by kernel size
+
+	let num_m_chunks = (m + cmc_ - 1) / cmc_;
+	let num_threads = min(num_m_chunks, *NUM_CPUS);
+	(num_threads, cmc_)
+}
+
+/// Implement matrix multiply using packed buffers and a microkernel strategy
+/// The type parameter `K` is the gemm microkernel configuration.
+/// The type parameter `C` is the outer gemm cache blocking configuration.
 unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 					   k: usize,
 					   n: usize,
@@ -178,21 +211,11 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 	let kmr = K::MR::to_usize();
 	let cnc = C::NC::to_usize();
 	let ckc = C::KC::to_usize();
-	let cmc_ = C::MC::to_usize();
-
-	debug_assert_eq!(0, cmc_ % kmr);
+	let (num_threads, cmc) = get_num_threads_and_mc(m, kmr, C::MC::to_usize());
+	debug_assert_eq!(0, cmc % kmr);
 	debug_assert_eq!(0, cnc % knr);
 
-	// rough adaption to split M direction over multiple CPUS if the work units wont be too small
-	// this could be improved to ensure each thread gets an equal number of chunks
-	// Rules: Don't go over cmc_, dont go under cmc_/2, stay divisible by kmr
-	let cmc = ((max( /// Take the max of either:
-					min((m + *NUM_CPUS - 1) / *NUM_CPUS, cmc_), // 1. The min of round_up(m/numcpus) or the default cmc
-					max(cmc_ / 2, kmr) // 2. The max of half the default cmc, or the kernel size in the m direction
-				)+ kmr - 1) / kmr) * kmr; // Then round up by kernel size
-
-	let num_m_chunks = (m + cmc - 1) / cmc;
-	let num_threads = min(num_m_chunks, *NUM_CPUS);
+	
 	let pool_opt = if num_threads > 1 {
 		THREAD_POOL.lock().ok()
 	} else {
@@ -217,7 +240,7 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 			});
 
 			// Pack B -> B~
-			pack(kc, nc, knr, bpp, b, csb, rsb);
+			pack::<K::T, K::NR>(kc, nc, knr, bpp, b, csb, rsb);
 
 			if let (Some(pool), true) = (pool_opt.as_ref(), num_threads > 1) {
 				// Need a struct to smuggle pointers across threads. ugh!
@@ -231,7 +254,7 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 				unsafe impl<T: Element> Send for Ptrs<T> {}
 
 				// Threads decrement the atomic int and move on to other work, last thread out flips the mutex/condvar
-				// This is likely a useless micro optimisation, but might be useful if the threadpool is shared and stressed and workloads are small?
+				// This is likely a useless micro optimisation, but might be useful if the threadpool is large & shared & stressed and workloads are small?
 				let mut pair = (Mutex::new(false), Condvar::new(), AtomicUsize::new(num_threads));    
 
 				for cpu_id in 0..num_threads {
@@ -253,23 +276,17 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 
 						// LOOP 3: split m into mc parts
 						for (l3, mc) in range_chunk(m, cmc) {
-							if l3 % num_threads != cpu_id {
-								continue;
-							} // threads leapfrog each other
+							if l3 % num_threads != cpu_id {continue;} // threads leapfrog each other
 
 							dprint!("LOOP 3, {}, mc={}", l3, mc);
 							let a = a.stride_offset(rsa, cmc * l3);
 							let c = c.stride_offset(rsc, cmc * l3);
 
 							// Pack A -> A~
-							pack(kc, mc, kmr, app, a, rsa, csa);
+							pack::<K::T, K::MR>(kc, mc, kmr, app, a, rsa, csa);
 
 							// First time writing to C, use user's `beta`, else accumulate
-							let betap = if l4 == 0 {
-								beta
-							} else {
-								<_>::one()
-							};
+							let betap = if l4 == 0 {beta} else {<K::T>::one()};
 
 							// LOOP 2 and 1
 							gemm_packed::<C, K>(nc, kc, mc, alpha, app, bpp, betap, c, rsc, csc);
@@ -300,14 +317,10 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 					let c = c.stride_offset(rsc, cmc * l3);
 
 					// Pack A -> A~
-					pack(kc, mc, kmr, app, a, rsa, csa);
+					pack::<K::T, K::MR>(kc, mc, kmr, app, a, rsa, csa);
 
 					// First time writing to C, use user's `beta`, else accumulate
-					let betap = if l4 == 0 {
-						beta
-					} else {
-						<_>::one()
-					};
+					let betap = if l4 == 0 {beta} else {<K::T>::one()};
 
 					// LOOP 2 and 1
 					gemm_packed::<C, K>(nc, kc, mc, alpha, app, bpp, betap, c, rsc, csc);
@@ -342,7 +355,7 @@ unsafe fn gemm_packed<C: CacheConfig, K: KernelConfig>(nc: usize,
 	// Zero or prescale if necessary
 	if beta.is_zero() {
 		zero_block::<K::T>(mc, nc, c, rsc, csc);
-	} else if !beta.is_one() {
+	} else if beta != K::T::one() {
 		scale_block::<K::T>(beta, mc, nc, c, rsc, csc);
 	}
 
@@ -358,7 +371,7 @@ unsafe fn gemm_packed<C: CacheConfig, K: KernelConfig>(nc: usize,
 
 			// GEMM KERNEL
 			if nr_ < nr || mr_ < mr {
-				masked_kernel::<K>(kc, alpha, &*app, &*bpp, &mut *c, rsc, csc, mr_, nr_);
+				generic_kernel::masked_kernel::<K>(kc, alpha, &*app, &*bpp, &mut *c, rsc, csc, mr_, nr_);
 			} else {
 				generic_kernel::kernel::<K>(kc, alpha, app, bpp, c, rsc, csc);
 			}
@@ -366,7 +379,6 @@ unsafe fn gemm_packed<C: CacheConfig, K: KernelConfig>(nc: usize,
 	}
 }
 
-#[inline(never)]
 unsafe fn scale_block<T: Element>(beta: T,
 									 rows: usize,
 									 cols: usize,
@@ -378,21 +390,21 @@ unsafe fn scale_block<T: Element>(beta: T,
 		for col in 0..cols {
 			for row in 0..rows {
 				let cptr = c.offset(1 * row as isize + csc * col as isize);
-				(*cptr).scale_by(beta);
+				*cptr = *cptr * beta;
 			}
 		}
 	} else if csc == 1 {
 		for row in 0..rows {
 			for col in 0..cols {
 				let cptr = c.offset(rsc * row as isize + 1 * col as isize);
-				(*cptr).scale_by(beta);
+				*cptr = *cptr * beta;
 			}
 		}
 	} else {
 		for col in 0..cols {
 			for row in 0..rows {
 				let cptr = c.offset(rsc * row as isize + csc * col as isize);
-				(*cptr).scale_by(beta);
+				*cptr = *cptr * beta;
 			}
 		}
 	}
@@ -485,8 +497,8 @@ unsafe fn aligned_packing_vec<C: CacheConfig, K: KernelConfig>(m: usize, k: usiz
 }
 
 
-
 /// Pack matrix into `pack`
+/// Variable notation refers to packing ~A. for ~B mr = NR::to_usize
 ///
 /// + kc: length of the micropanel
 /// + mc: number of rows/columns in the matrix to be packed
@@ -494,7 +506,7 @@ unsafe fn aligned_packing_vec<C: CacheConfig, K: KernelConfig>(m: usize, k: usiz
 /// + rsa: row stride
 /// + csa: column stride
 /// + zero: zero element to pad with
-unsafe fn pack<T: Element>(kc: usize,
+unsafe fn pack<T: Element, MR: Loop>(kc: usize,
 				  mc: usize,
 				  mr: usize,
 				  pack: *mut T,
@@ -503,30 +515,38 @@ unsafe fn pack<T: Element>(kc: usize,
 				  csa: isize)
 {
 	
+	debug_assert_eq!(mr, MR::to_usize());
+	let mr = MR::to_usize();
 
-	//if rsa == 1 || csa == 1 {
-	//    vec_pack(kc,mc,mr,pack,a,rsa,csa);
-	//} else {
-		for ir in 0..mc / mr {
-			let a = a.stride_offset(rsa, ir * mr);
-			let pack = pack.offset((ir * mr * kc) as isize);
-
-			
-			let mut j = 0;
-			U4::partial_unroll(kc, |_|{
-				let mut i = 0;
-				U4::partial_unroll(mr, |_|{
+	for ir in 0..mc / mr {
+		let a = a.stride_offset(rsa, ir * mr);
+		let pack = pack.offset((ir * mr * kc) as isize);
+		if csa == 1 {
+			U4::partial_unroll(kc,|j|{
+				MR::full_unroll(|i|{
+					let pack = pack.offset((j*mr+i)as isize);
+					*pack = *a.stride_offset(rsa, i)
+							.stride_offset(1, j);
+				});
+			});
+		} else if rsa == 1 {
+			U4::partial_unroll(kc,|j|{
+				MR::full_unroll(|i|{
+					let pack = pack.offset((j*mr+i)as isize);
+					*pack = *a.stride_offset(1, i)
+							.stride_offset(csa, j);
+				});
+			});
+		} else {
+			U4::partial_unroll(kc,|j|{
+				MR::full_unroll(|i|{
 					let pack = pack.offset((j*mr+i)as isize);
 					*pack = *a.stride_offset(rsa, i)
 							.stride_offset(csa, j);
-					i+=1;        
-				});  
-				j+=1;
-			});    
-
+				});
+			});
 		}
-	//}
-
+	}
 
 	let mut pack = pack.offset(((mc/mr)*mr*kc) as isize);
 
@@ -536,8 +556,10 @@ unsafe fn pack<T: Element>(kc: usize,
 	let rest = mc % mr;
 	if rest > 0 {
 		let row_offset = (mc / mr) * mr;
-		for j in 0..kc {
-			for i in 0..mr {
+		//for j in 0..kc {
+		U4::partial_unroll(kc,|j|{
+			MR::full_unroll(|i|{
+			//for i in 0..mr {
 				if i < rest {
 					*pack = *a.stride_offset(rsa, i + row_offset)
 							  .stride_offset(csa, j);
@@ -545,143 +567,7 @@ unsafe fn pack<T: Element>(kc: usize,
 					*pack = zero;
 				}
 				pack.inc();
-			}
-		}
-	}
-}
-
-/// Partial Pack matrix into `pack`
-/// try and get llvm to generate simd 4x4 transpose code. Not currently working.
-/// panics if neither csa==1 or rsa==1
-// #[allow(dead_code)]
-// #[allow(unused_assignments)]
-// unsafe fn vec_pack<T>(kc: usize,
-// 				  mc: usize,
-// 				  mr: usize,
-// 				  pack: *mut T,
-// 				  a: *const T,
-// 				  rsa: isize,
-// 				  csa: isize)
-// 	where T: Element
-// {
-
-// 	if csa == 1 {
-// 		for ir in 0..mc / mr {
-// 			let a = a.stride_offset(rsa, ir * mr);
-// 			let pack = pack.offset((ir * mr * kc) as isize);
-
-// 			for jo in 0..kc/4 {
-			   
-// 				for io in 0..mr/4{
-// 					let mut pack = pack.offset(((jo*4)*mr+io*4)as isize);
-// 					let mut a = a.stride_offset(rsa, io*4).stride_offset(csa, jo*4);
-// 					let zero = <_>::zero();
-// 					let mut temp = [[zero;4];4];
-				
-// 					loop4! (i, {
-// 						loop4! (j, {
-						
-// 							temp[j][i] = *a.offset(j as isize);
-// 						});
-// 						a = a.offset(rsa);
-// 					});
-
-// 					loop4! (j, {
-// 						loop4! (i, {
-// 							*pack.offset(i as isize) = temp[j][i];
-// 						});
-// 						pack = pack.offset(mr as isize);
-// 					});
-
-// 				}
-				
-// 				for i in (mr/4)*4..mr{
-// 					let pack = pack.offset((jo*4*mr+i)as isize);
-// 					*pack = *a.stride_offset(rsa, i)
-// 							.stride_offset(csa, jo*4);
-// 				}
-// 			}
-
-// 			for j in (kc/4)*4..kc {
-// 				for i in 0..mr {
-// 					let pack = pack.offset((j*mr+i)as isize);
-// 					*pack = *a.stride_offset(rsa, i)
-// 							.stride_offset(csa, j);
-// 				}         
-// 			}
-// 		}
-// 	} else if rsa == 1 {
-// 		for ir in 0..mc / mr {
-// 			let a = a.stride_offset(rsa, ir * mr);
-// 			let pack = pack.offset((ir * mr * kc) as isize);
-
-// 			for jo in 0..kc/4 {
-
-// 				for io in 0..mr/4{
-// 					let mut pack = pack.offset(((jo*4)*mr+io*4)as isize);
-// 					let mut a = a.stride_offset(rsa, io*4).stride_offset(csa, jo*4);
-
-// 					loop4! (_j, {
-// 						loop4! (i, {
-// 							*pack.offset(i) = *a.offset(i);
-// 						});
-// 						pack = pack.offset(mr as isize);
-// 						a = a.offset(csa);
-// 					});
-
-// 				}
-// 				for i in (mr/4)*4..mr{
-// 					let pack = pack.offset((jo*4*mr+i)as isize);
-// 					*pack = *a.stride_offset(rsa, i)
-// 							.stride_offset(csa, jo*4);
-// 				}
-// 			}
-
-// 			for j in (kc/4)*4..kc {
-// 				for i in 0..mr {
-// 					let pack = pack.offset((j*mr+i)as isize);
-// 					*pack = *a.stride_offset(rsa, i)
-// 							.stride_offset(csa, j);
-// 				}         
-// 			}
-// 		}
-// 	} else {
-// 		unreachable!("either csa or rsa must equal 1");
-// 	}
-
-// }
-
-
-
-/// Call the GEMM kernel with a "masked" output C.
-///
-/// Simply redirect the MR by NR kernel output to the passed
-/// in `mask_buf`, and copy the non masked region to the real
-/// C.
-///
-/// + rows: rows of kernel unmasked
-/// + cols: cols of kernel unmasked
-#[inline(never)]
-unsafe fn masked_kernel<K: KernelConfig>(k: usize,
-							  alpha: K::T,
-							  a: *const K::T,
-							  b: *const K::T,
-							  c: *mut K::T,
-							  rsc: isize,
-							  csc: isize,
-							  rows: usize,
-							  cols: usize)
-{
-	let mr = K::MR::to_usize();
-	let nr = K::NR::to_usize();
-
-	let ab = generic_kernel::kernel_compute::<K>(k, K::T::one(), a, b);
-	for j in 0..nr {
-		for i in 0..mr {
-			if i < rows && j < cols {
-				let cptr = c.offset(rsc * i as isize + csc * j as isize);
-				(*cptr).scaled_add(alpha, ab[i][j]);
-			}
-		}
+			});
+		});
 	}
 }

@@ -10,7 +10,41 @@
 use typenum::Unsigned;
 use typenum_loops::Loop;
 use generic_params::*;
+use num::One;
+use std::cmp::min;
 
+#[inline(always)]
+/// Call the GEMM kernel with a "masked" output C.
+///
+/// Simply redirect the MR by NR kernel output to the passed
+/// in `mask_buf`, and copy the non masked region to the real
+/// C.
+///
+/// + rows: rows of kernel unmasked
+/// + cols: cols of kernel unmasked
+pub unsafe fn masked_kernel<K: KernelConfig>(k: usize,
+							  alpha: K::T,
+							  a: *const K::T,
+							  b: *const K::T,
+							  c: *mut K::T,
+							  rsc: isize,
+							  csc: isize,
+							  rows: usize,
+							  cols: usize)
+{
+	let mr = min(K::MR::to_usize(), rows);
+	let nr = min(K::NR::to_usize(), cols);
+	let one = <K::T as One>::one();
+	let ab = kernel_compute::<K>(k, one, a, b);
+	for j in 0..nr {
+		for i in 0..mr {
+			//if i < rows && j < cols {
+				let cptr = c.offset(rsc * i as isize + csc * j as isize);
+				*cptr = *cptr + alpha * ab[i][j];
+			//}
+		}
+	}
+}
 
 /// matrix multiplication kernel
 ///
@@ -42,7 +76,7 @@ pub unsafe fn kernel<K: KernelConfig>(k: usize,
 
 /// Split out compute for better vectorisation
 #[inline(never)]
-pub unsafe fn kernel_compute<K: KernelConfig>(k: usize, alpha: K::T, a: *const K::T, b: *const K::T) -> GA<GA<K::T, K::NR>, K::MR>{
+unsafe fn kernel_compute<K: KernelConfig>(k: usize, alpha: K::T, a: *const K::T, b: *const K::T) -> GA<GA<K::T, K::NR>, K::MR>{
 
 	// Compute matrix multiplication into ab[i][j]
 	let mut ab = <GA<GA<K::T, K::NR>, K::MR>>::default();
@@ -66,7 +100,7 @@ pub unsafe fn kernel_compute<K: KernelConfig>(k: usize, alpha: K::T, a: *const K
 	ab
 }
 
-/// Choose writes to C in a cache/vectorisation friendly manner
+/// Choose writes to C in a cache/vectorisation friendly manner if possible
 #[inline(always)]
 unsafe fn kernel_write<K: KernelConfig>(c: *mut K::T, rsc: isize, csc: isize, ab: & GA<GA<K::T, K::NR>, K::MR>) {
 
