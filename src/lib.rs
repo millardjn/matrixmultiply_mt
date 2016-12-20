@@ -52,9 +52,10 @@ extern crate typenum_loops;
 extern crate typenum;
 extern crate generic_array;
 extern crate num;
-
-
+extern crate rawpointer;
+extern crate num_cpus;
 extern crate threadpool;
+
 #[macro_use] extern crate lazy_static;
 
 #[macro_use] mod debugmacros;
@@ -63,8 +64,7 @@ extern crate threadpool;
 mod generic_params;
 mod generic_kernel;
 mod gemm;
-
-mod pointer;
+//mod pointer;
 mod util;
 
 pub use gemm::sgemm;

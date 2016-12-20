@@ -1,7 +1,7 @@
 #![feature(test)]
-extern crate matrixmultiply;
-pub use matrixmultiply::sgemm;
-pub use matrixmultiply::dgemm;
+extern crate matrixmultiply_mt;
+pub use matrixmultiply_mt::sgemm;
+pub use matrixmultiply_mt::dgemm;
 
 extern crate test;
 
@@ -71,14 +71,14 @@ mat_mul!{mat_mul_f32, sgemm,
     (mix16x4, 32, 4, 32)
     (mix32x2, 32, 2, 32)
     (mix97, 97, 97, 125)
-    (skew256x2, 256, 2, 512)
-    (skew2x256, 2, 256, 512)
+    (skew256x15, 256, 15, 512)
+    (skew15x256, 15, 256, 512)
     (skew256x16, 256, 16, 512)
     (skew16x256, 16, 256, 512)
-    (thinskew256x2, 256, 2, 3)
-    (thinskew2x256, 2, 256, 3)
-    (thinskew256x16, 256, 16, 3)
-    (thinskew16x256, 16, 256, 3)
+    (thinskew256x3, 256, 3, 7)
+    (thinskew3x256, 3, 256, 7)
+    (thinskew256x16, 256, 16, 7)
+    (thinskew16x256, 16, 256, 7)
     (mix128x10000x128, 128, 10000, 128)
 }
 

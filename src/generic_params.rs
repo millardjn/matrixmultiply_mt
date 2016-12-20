@@ -14,25 +14,64 @@ use generic_array::{GenericArray, ArrayLength};
 
 pub type GA<T, U> = GenericArray<T, U>;
 
-pub struct SgemmKernelAVX;
-impl KernelConfig for SgemmKernelAVX {
+pub struct SgemmAVX16x4;
+impl KernelConfig for SgemmAVX16x4 {
 	type T = f32;
 	type MR = U4;
 	type NR = U16;
 	type KU = U5;
+	type R = SgemmAVX8x8;
 }
 
-pub struct DgemmKernelAVX;
-impl KernelConfig for DgemmKernelAVX {
+pub struct SgemmAVX8x8;
+impl KernelConfig for SgemmAVX8x8 {
+	type T = f32;
+	type MR = U8;
+	type NR = U8;
+	type KU = U5;
+	type R = SgemmAVX4x8;
+}
+
+pub struct SgemmAVX4x8;
+impl KernelConfig for SgemmAVX4x8 {
+	type T = f32;
+	type MR = U8;
+	type NR = U4;
+	type KU = U6;
+	type R = Self;
+}
+
+pub struct DgemmAVX8x4;
+impl KernelConfig for DgemmAVX8x4 {
 	type T = f64;
 	type MR = U4;
 	type NR = U8;
 	type KU = U5;
+	type R = DgemmAVX4x8;
+}
+
+pub struct DgemmAVX4x8;
+impl KernelConfig for DgemmAVX4x8 {
+	type T = f64;
+	type MR = U8;
+	type NR = U4;
+	type KU = U5;
+	type R = DgemmAVX2x8;
+}
+
+pub struct DgemmAVX2x8;
+impl KernelConfig for DgemmAVX2x8 {
+	type T = f64;
+	type MR = U8;
+	type NR = U2;
+	type KU = U4;
+	type R = Self;
 }
 
 pub struct SgemmCache;
 impl CacheConfig for SgemmCache{
 	type A = U64;
+	type MT = U64;
 	type MC = U64;
 	type NC = U1024;
 	type KC = U256;
@@ -41,12 +80,23 @@ impl CacheConfig for SgemmCache{
 pub struct DgemmCache;
 impl CacheConfig for DgemmCache{
 	type A = U64;
-	type MC = U64;
+	type MT = U64;
+	type MC = U32;
 	type NC = U512;
 	type KC = U256;
 }
 
+// pub struct DgemmCache;
+// impl CacheConfig for DgemmCache{
+// 	type A = U64;
+// 	type MT = U64;
+// 	type MC = U64;
+// 	type NC = U1024;
+// 	type KC = U128;
+// }
+
 pub trait KernelConfig: 'static {
+
 	/// Matrix element: [f32|f64]
 	type T: Element;
 	/// Number of registers used in kernel
@@ -54,12 +104,17 @@ pub trait KernelConfig: 'static {
 	/// Register width
 	type NR: Unsigned + Loop + ArrayLength<Self::T>;
 	/// Unrolling factor of kernel loop over K dimension.
-	type KU: Unsigned + Loop + ArrayLength<Self::T>;
+	type KU: Unsigned + Loop;
+	/// Alternative kernel with lower NR. Set to Self at end of chain.
+	type R: KernelConfig; // <T=Self::T> constraint solver cant handle this yet
 }
 
 pub trait CacheConfig: 'static {
 	/// Required alignment in bytes. Usually cache line size
 	type A: Unsigned;
+
+	/// how much smaller than MC*NC*KC does a multiply have to be before multithreading should be disallowed
+	type MT: Unsigned;
 
 	/// Rows of Ap at a time. (3rd loop)
 	///

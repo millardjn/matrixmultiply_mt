@@ -1,5 +1,5 @@
-extern crate matrixmultiply;
-use matrixmultiply::{sgemm, dgemm};
+extern crate matrixmultiply_mt;
+use matrixmultiply_mt::{sgemm, dgemm};
 
 use std::fmt::{Display, Debug};
 

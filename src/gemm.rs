@@ -8,26 +8,23 @@
 // except according to those terms.
 
 
-extern crate num_cpus;
-extern crate threadpool;
-
 use threadpool::ThreadPool;
+use num_cpus;
 use std::sync::{Condvar, Mutex};
 use std::sync::atomic::{Ordering, AtomicUsize};
 use std::cmp::{min, max};
 use std::mem::size_of;
 use std::mem::align_of;
-
+use std::mem;
 use util::range_chunk;
 use util::round_up_to;
+use util::round_up_div;
 
-use pointer::PointerExt;
-use typenum::{Unsigned, U4};
-
+use rawpointer::PointerExt;
+use typenum::{Unsigned, U4, U2};
 use generic_params::*;
 use generic_kernel;
 use typenum_loops::Loop;
-
 use num::{Zero, One};
 
 lazy_static! {
@@ -66,7 +63,7 @@ pub unsafe fn sgemm(m: usize,
 					rsc: isize,
 					csc: isize) {
 
-	gemm::<SgemmCache, SgemmKernelAVX>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
+	gemm::<SgemmCache, SgemmAVX16x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
 
 }
 
@@ -101,10 +98,10 @@ pub unsafe fn dgemm(m: usize,
 					rsc: isize,
 					csc: isize) {
 
-	gemm::<DgemmCache, DgemmKernelAVX>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
+	gemm::<DgemmCache, DgemmAVX8x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
 }
 
-/// General matrix multiplication (f64|f32)
+/// General matrix multiplication (num::Num)
 /// The type parameter `K` is the gemm microkernel configuration.
 /// The type parameter `C` is the outer gemm cache blocking configuration.
 
@@ -137,54 +134,95 @@ pub unsafe fn gemm<C: CacheConfig, K: KernelConfig>(m: usize,
 					   rsc: isize,
 					   csc: isize)
 {
+	let (m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc) = if n > m {
+			(n, k, m, b, csb, rsb, a, csa, rsa, c, csc, rsc)
+		} else {
+			(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc)
+		};
 
-	if m >= K::NR::to_usize() || n >= K::NR::to_usize() || k >= K::NR::to_usize() {
-		let (same_threads, _) = get_num_threads_and_mc(m, K::MR::to_usize(), C::MC::to_usize());
-		let (flip_threads, _) = get_num_threads_and_mc(n, K::MR::to_usize(), C::MC::to_usize());
+
+	if <K::R as KernelConfig>::NR::to_usize() < K::NR::to_usize() && n <= <K::R as KernelConfig>::NR::to_usize(){
+		assert_eq!(size_of::<K::T>(), size_of::<<K::R as KernelConfig>::T>());
+		// So this is insanely unsafe. While the types K::T and K::R::T have to be the same size, they may be completely different types
+		gemm::<C, K::R>(m, k, n, mem::transmute_copy(&alpha), mem::transmute(a), rsa, csa, mem::transmute(b), rsb, csb, mem::transmute_copy(&beta), mem::transmute(c), rsc, csc)
+	
+	}else if n*m*k < 2*((min(n, K::NR::to_usize()) + min(m, K::MR::to_usize()))*k + min(n, K::NR::to_usize())*min(m, K::MR::to_usize())) {
+
+		U2::partial_unroll(m, |i|{
+			U2::partial_unroll(n, |j|{
+				let celt = c.offset((i as isize * rsc + j as isize *csc) );
+				*celt = if beta.is_zero() {K::T::zero()} else {*celt * beta};
+				U2::partial_unroll(k, |x|{
+					*celt = *celt + *a.offset(i as isize  * rsa + x as isize  * csa) * *b.offset(x as isize  * rsb + j as isize  * csb) * alpha;
+				});
+			});
+		});
+	}else {
+		let (same_threads, _) = get_num_threads_and_cmc::<C, K>(m, K::MR::to_usize(), C::MC::to_usize());
+		let (flip_threads, _) = get_num_threads_and_cmc::<C, K>(n, K::MR::to_usize(), C::MC::to_usize());
 
 		// Flip matrix multiply to make maximise multithreadingon rectangular C, otherwise flip if it makes iteration over C more cache friendly
-		// Tradeoff between multithreading and iteration order could be made more intelligently, such as, if max cores already available, then choose to optimise access patterns.
+		// Tradeoff between multithreading and iteration order could be made more intelligently, e.g. include roofline models
 		let (m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc) = if flip_threads > same_threads || (flip_threads == same_threads && rsc.abs() < csc.abs()) {
 				(n, k, m, b, csb, rsb, a, csa, rsa, c, csc, rsc)
 			} else {
 				(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc)
 			};
 		gemm_loop::<C, K>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
-	} else {
-		// Each case for for row stride or col stride == 1 should be special cased.
-		// Currently only very small matricies are handled here, eventually thin matrices (low reuse) should be too.
-		if beta.is_zero() {
-			for i in 0..m as isize {
-				for j in 0..n as isize {
-					let celt = c.offset((i * rsc + j*csc) );
-					*celt = (0..k as isize).fold(K::T::zero(),
-						move |s, x| s + *a.offset(i * rsa + x * csa) * *b.offset(x * rsb + j * csb) * alpha);
-				}
-			}
-		} else {
-			for i in 0..m as isize {
-				for j in 0..n as isize {
-					let celt = c.offset((i * rsc + j*csc) );
-					*celt = (0..k as isize).fold(*celt*beta,
-						move |s, x| s + *a.offset(i * rsa + x * csa) * *b.offset(x * rsb + j * csb) * alpha);
-				}
-			}
-		}
 	}
 }
 
-/// rough adaption to split M direction over multiple CPUS if the work units wont be too small
-/// this could be improved to ensure each thread gets an equal number of chunks
-/// Rules: Don't go over cmc_, dont go under cmc_*2/3, stay divisible by kmr
-fn get_num_threads_and_mc(m: usize, mr: usize, mc: usize) -> (usize, usize){
-	let cmc_ = ((max( /// Take the max of either:
-					min((m + *NUM_CPUS - 1) / *NUM_CPUS, mc), // 1. The min of round_up(m/numcpus) or the default cmc
-					max((mc*2)/3, mr) // 2. The max of half the default cmc, or the kernel size in the m direction
-				)+ mr - 1) / mr) * mr; // Then round up by kernel size
 
-	let num_m_chunks = (m + cmc_ - 1) / cmc_;
-	let num_threads = min(num_m_chunks, *NUM_CPUS);
-	(num_threads, cmc_)
+/// split M direction over multiple CPUS as long as the work units wont be too small.
+///
+/// First, maximise num_threads.
+/// Second, maximise cmc.
+/// while preserving 3 things:
+/// * dont let `cmc*min(C:KC, k)*min(C:NC, n)` go below `C:MC*C:KC*C:NC/C:MT` avoid excessive synchronisation costs
+/// * `cmc` must be divisible by `kmr`
+/// * dont let `cmc*min(C:KC, k)` go above `C:MC*C:KC` still fit in cache
+fn get_num_threads_and_cmc<C: CacheConfig, K: KernelConfig>(m: usize, k: usize, n: usize) -> (usize, usize){
+
+	let m_bands = round_up_div(m, K::MR::to_usize());
+
+	// minimum bound on mc before splitting over threads is some fraction of the max compute per ~A cache block
+	let min_split_mc_bands = {
+		let max_compute = C::MC::to_usize() * C::KC::to_usize() * C::NC::to_usize();
+		let min_compute = max(max_compute/C::MT::to_usize(), 1);
+
+		let max_kc = max(min(k, C::KC::to_usize()), 1);
+		let max_nc = max(min(round_up_to(n, K::NR::to_usize()), C::NC::to_usize()), 1);
+
+		round_up_div(round_up_div(min_compute, max_nc * max_kc), K::MR::to_usize())
+	};
+
+	// maximum bound mc is that the ~A block must be less than the maximum size
+	let max_mc_bands = {
+		let max_size = C::KC::to_usize() * C::MC::to_usize();
+		let max_kc = max(min(k, C::KC::to_usize()), 1);
+		(max_size / max_kc + C::MC::to_usize())/(K::MR::to_usize()*2)
+	};
+
+
+	let num_threads = {
+		let full_blocks = m_bands/min_split_mc_bands;
+		max(min(*NUM_CPUS, full_blocks), 1)
+	};
+
+
+	let mc = {
+		let m_bands_per_thread = max(round_up_div(m_bands, num_threads), 1);
+		let blocks_per_thread = round_up_div(m_bands_per_thread, max_mc_bands);
+		let mc_bands = round_up_div(m_bands_per_thread, blocks_per_thread);
+		mc_bands * K::MR::to_usize()
+	};
+
+	debug_assert!(mc <= max_mc_bands* K::MR::to_usize(), "mc{} min{} max{}", mc, min_split_mc_bands, max_mc_bands);
+	debug_assert!(num_threads == 1 || mc >= min_split_mc_bands* K::MR::to_usize(), "mc{} min{} max{}", mc, min_split_mc_bands, max_mc_bands);
+	debug_assert!(num_threads == 1 || mc*max(min(k, C::KC::to_usize()), 1)*max(min(round_up_to(n, K::NR::to_usize()), C::NC::to_usize()), 1) >= C::MC::to_usize() * C::KC::to_usize() * C::NC::to_usize()/C::MT::to_usize());
+	debug_assert_eq!(0, mc % K::MR::to_usize());
+
+	(num_threads, mc)
 }
 
 /// Implement matrix multiply using packed buffers and a microkernel strategy
@@ -211,9 +249,9 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 	let kmr = K::MR::to_usize();
 	let cnc = C::NC::to_usize();
 	let ckc = C::KC::to_usize();
-	let (num_threads, cmc) = get_num_threads_and_mc(m, kmr, C::MC::to_usize());
-	debug_assert_eq!(0, cmc % kmr);
-	debug_assert_eq!(0, cnc % knr);
+	let (num_threads, cmc) = get_num_threads_and_cmc::<C, K>(m, k, n);
+
+	assert_eq!(0, cnc % knr);
 
 	
 	let pool_opt = if num_threads > 1 {
@@ -222,7 +260,7 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 		None
 	};
 
-	let (_vec , app_stride, app_base, bpp) = aligned_packing_vec::<C, K>(m, k, n, num_threads);
+	let (_vec , app_stride, app_base, bpp) = aligned_packing_vec::<K>(m, k, n, cmc, ckc, cnc, C::A::to_usize(), num_threads);
 	
 	// LOOP 5: split n into nc parts
 	for (l5, nc) in range_chunk(n, cnc) {
@@ -236,7 +274,7 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 			let b = b.stride_offset(rsb, ckc * l4);
 			let a = a.stride_offset(csa, ckc * l4);
 			debug!(for elt in &mut packv {
-				*elt = <_>::one();
+				*elt = K::T::one();
 			});
 
 			// Pack B -> B~
@@ -286,10 +324,10 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 							pack::<K::T, K::MR>(kc, mc, kmr, app, a, rsa, csa);
 
 							// First time writing to C, use user's `beta`, else accumulate
-							let betap = if l4 == 0 {beta} else {<K::T>::one()};
+							let betap = if l4 == 0 {beta} else {K::T::one()};
 
 							// LOOP 2 and 1
-							gemm_packed::<C, K>(nc, kc, mc, alpha, app, bpp, betap, c, rsc, csc);
+							gemm_packed::<K>(nc, kc, mc, alpha, app, bpp, betap, c, rsc, csc);
 						}
 
 						let x = counter.fetch_sub(1, Ordering::Relaxed);
@@ -323,7 +361,7 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 					let betap = if l4 == 0 {beta} else {<K::T>::one()};
 
 					// LOOP 2 and 1
-					gemm_packed::<C, K>(nc, kc, mc, alpha, app, bpp, betap, c, rsc, csc);
+					gemm_packed::<K>(nc, kc, mc, alpha, app, bpp, betap, c, rsc, csc);
 				}
 			}
 
@@ -338,7 +376,7 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 /// + nc: columns of packed B
 /// + kc: columns of packed A / rows of packed B
 /// + mc: rows of packed A
-unsafe fn gemm_packed<C: CacheConfig, K: KernelConfig>(nc: usize,
+unsafe fn gemm_packed<K: KernelConfig>(nc: usize,
 						 kc: usize,
 						 mc: usize,
 						 alpha: K::T,
@@ -448,18 +486,18 @@ unsafe fn zero_block<T: Element>(rows: usize,
 /// we have rounded up to a multiple of the kernel size).
 ///
 /// Return packing vector, stride between of each app region, aligned pointer to start of first app, and aligned pointer to start of b
-unsafe fn aligned_packing_vec<C: CacheConfig, K: KernelConfig>(m: usize, k: usize, n: usize, num_a: usize) -> (Vec<K::T>, isize, *mut K::T, *mut K::T){
-	let m = min(m, C::MC::to_usize());
-	let k = min(k, C::KC::to_usize());
-	let n = min(n, C::NC::to_usize());
-	let align_to = C::A::to_usize();
+unsafe fn aligned_packing_vec<K: KernelConfig>(m: usize, k: usize, n: usize, cmc: usize, ckc: usize, cnc: usize, align: usize, num_a: usize) -> (Vec<K::T>, isize, *mut K::T, *mut K::T){
+	let m = min(m, cmc);
+	let k = min(k, ckc);
+	let n = min(n, cnc);
+
 	// round up k, n to multiples of mr, nr
 	// round up to multiple of kc
 	
-	debug_assert!(align_to % size_of::<K::T>() == 0);
-	debug_assert!(align_to % align_of::<K::T>() == 0);
+	assert!(align % size_of::<K::T>() == 0);
+	assert!(align % align_of::<K::T>() == 0);
 	
-	let align_elems = align_to / size_of::<K::T>();
+	let align_elems = align / size_of::<K::T>();
 
 	let apack_size = k * round_up_to(m, K::MR::to_usize());
 	let bpack_size = k * round_up_to(n, K::NR::to_usize());
@@ -483,11 +521,11 @@ unsafe fn aligned_packing_vec<C: CacheConfig, K: KernelConfig>(m: usize, k: usiz
 
 	
 	let mut a_ptr = v.as_mut_ptr();
-	if align_to != 0 {
-		let cur_align = a_ptr as usize % align_to;
+	if align != 0 {
+		let cur_align = a_ptr as usize % align;
 		debug_assert!(cur_align % size_of::<K::T>() == 0);
 		if cur_align != 0 {
-			a_ptr = a_ptr.offset(((align_to - cur_align) / size_of::<K::T>()) as isize);
+			a_ptr = a_ptr.offset(((align - cur_align) / size_of::<K::T>()) as isize);
 		}
 	}
 	
@@ -550,21 +588,20 @@ unsafe fn pack<T: Element, MR: Loop>(kc: usize,
 
 	let mut pack = pack.offset(((mc/mr)*mr*kc) as isize);
 
-	let zero = <_>::zero();
-
 	// Pad with zeros to multiple of kernel size (uneven mc)
 	let rest = mc % mr;
 	if rest > 0 {
 		let row_offset = (mc / mr) * mr;
 		//for j in 0..kc {
 		U4::partial_unroll(kc,|j|{
+
 			MR::full_unroll(|i|{
 			//for i in 0..mr {
 				if i < rest {
 					*pack = *a.stride_offset(rsa, i + row_offset)
 							  .stride_offset(csa, j);
 				} else {
-					*pack = zero;
+					*pack = T::zero();
 				}
 				pack.inc();
 			});

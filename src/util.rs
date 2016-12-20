@@ -43,9 +43,10 @@ impl Iterator for RangeChunk {
 
 #[inline]
 pub fn round_up_to(x: usize, multiple_of: usize) -> usize {
-    let (mut d, r) = (x / multiple_of, x % multiple_of);
-    if r > 0 {
-        d += 1;
-    }
-    d * multiple_of
+    round_up_div(x, multiple_of)*multiple_of
+}
+
+#[inline]
+pub fn round_up_div(n: usize, d: usize)-> usize{
+    (n + d -1)/d
 }
