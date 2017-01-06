@@ -185,8 +185,15 @@ fn get_num_threads_and_cmc<C: CacheConfig, K: KernelConfig>(m: usize, k: usize, 
 
 	let m_bands = round_up_div(m, K::MR::to_usize());
 
+	// maximum bound mc is that the ~A block must be less than the maximum size
+	let max_mc_bands = {
+		let max_size = C::KC::to_usize() * C::MC::to_usize();
+		let max_kc = max(min(k, C::KC::to_usize()), 1);
+		(max_size / max_kc + C::MC::to_usize())/(K::MR::to_usize()*2)
+	};
+
 	// minimum bound on mc before splitting over threads is some fraction of the max compute per ~A cache block
-	let min_split_mc_bands = {
+	let min_split_mc_bands = min(max_mc_bands, {
 		let max_compute = C::MC::to_usize() * C::KC::to_usize() * C::NC::to_usize();
 		let min_compute = max(max_compute/C::MT::to_usize(), 1);
 
@@ -194,14 +201,7 @@ fn get_num_threads_and_cmc<C: CacheConfig, K: KernelConfig>(m: usize, k: usize, 
 		let max_nc = max(min(round_up_to(n, K::NR::to_usize()), C::NC::to_usize()), 1);
 
 		round_up_div(round_up_div(min_compute, max_nc * max_kc), K::MR::to_usize())
-	};
-
-	// maximum bound mc is that the ~A block must be less than the maximum size
-	let max_mc_bands = {
-		let max_size = C::KC::to_usize() * C::MC::to_usize();
-		let max_kc = max(min(k, C::KC::to_usize()), 1);
-		(max_size / max_kc + C::MC::to_usize())/(K::MR::to_usize()*2)
-	};
+	});
 
 
 	let num_threads = {
@@ -213,13 +213,17 @@ fn get_num_threads_and_cmc<C: CacheConfig, K: KernelConfig>(m: usize, k: usize, 
 	let mc = {
 		let m_bands_per_thread = max(round_up_div(m_bands, num_threads), 1);
 		let blocks_per_thread = round_up_div(m_bands_per_thread, max_mc_bands);
-		let mc_bands = round_up_div(m_bands_per_thread, blocks_per_thread);
-		mc_bands * K::MR::to_usize()
+		let mc_bands = min(round_up_div(m_bands_per_thread, blocks_per_thread), m_bands);
+		let mc = mc_bands * K::MR::to_usize();
+
+		// normally both of these would be true. however when dealing with low compute high memory operations, the mc direction may be split over multiple cpus when the cache limit is exceeded, even when mc will be less than minimum splitting size for compute
+		//debug_assert!(num_threads == 1 || mc >= min_split_mc_bands* K::MR::to_usize(), "threads{} mc{} min{} max{} bpt{} mbpt{}", num_threads, mc, min_split_mc_bands, max_mc_bands, blocks_per_thread, m_bands_per_thread);
+		//debug_assert!(num_threads == 1 || mc*max(min(k, C::KC::to_usize()), 1)*max(min(round_up_to(n, K::NR::to_usize()), C::NC::to_usize()), 1) >= C::MC::to_usize() * C::KC::to_usize() * C::NC::to_usize()/C::MT::to_usize());
+		mc
 	};
 
 	debug_assert!(mc <= max_mc_bands* K::MR::to_usize(), "mc{} min{} max{}", mc, min_split_mc_bands, max_mc_bands);
-	debug_assert!(num_threads == 1 || mc >= min_split_mc_bands* K::MR::to_usize(), "mc{} min{} max{}", mc, min_split_mc_bands, max_mc_bands);
-	debug_assert!(num_threads == 1 || mc*max(min(k, C::KC::to_usize()), 1)*max(min(round_up_to(n, K::NR::to_usize()), C::NC::to_usize()), 1) >= C::MC::to_usize() * C::KC::to_usize() * C::NC::to_usize()/C::MT::to_usize());
+	
 	debug_assert_eq!(0, mc % K::MR::to_usize());
 
 	(num_threads, mc)
