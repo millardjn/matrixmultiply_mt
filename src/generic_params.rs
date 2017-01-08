@@ -7,7 +7,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use num::Num;
+use num_traits::float::Float;
 use typenum::*;
 use typenum_loops::Loop;
 use generic_array::{GenericArray, ArrayLength};
@@ -143,5 +143,5 @@ pub trait CacheConfig: 'static {
 }
 
 
-pub trait Element: Copy + Send + Default + Num {}
-impl<T: Copy + Send + Default + Num> Element for T {}
+pub trait Element: Copy + Send + Default + Float {}
+impl<T: Copy + Send + Default + Float> Element for T {}

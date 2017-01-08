@@ -51,7 +51,7 @@
 extern crate typenum_loops;
 extern crate typenum;
 extern crate generic_array;
-extern crate num;
+extern crate num_traits;
 extern crate rawpointer;
 extern crate num_cpus;
 extern crate threadpool;

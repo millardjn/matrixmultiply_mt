@@ -25,7 +25,7 @@ use typenum::{Unsigned, U4, U2};
 use generic_params::*;
 use generic_kernel;
 use typenum_loops::Loop;
-use num::{Zero, One};
+use num_traits::identities::{One, Zero};
 
 lazy_static! {
 	static ref NUM_CPUS: usize = num_cpus::get();

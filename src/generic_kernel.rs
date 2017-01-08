@@ -10,7 +10,7 @@
 use typenum::Unsigned;
 use typenum_loops::Loop;
 use generic_params::*;
-use num::One;
+use num_traits::identities::One;
 use std::cmp::min;
 
 #[inline(always)]
