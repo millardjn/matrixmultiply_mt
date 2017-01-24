@@ -5,7 +5,7 @@ authors = ["bluss", "J. Millard"]
 
 license = "MIT/Apache-2.0"
 
-repository = "https://github.com/millardjn/matrixmultiply"
+repository = "https://github.com/millardjn/matrixmultiply_mt"
 documentation = "https://bluss.github.io/matrixmultiply/"
 
 description = "Multithreaded Fork of bluss's matrixmultiply crate. General matrix multiplication of f32 and f64 matrices in Rust. Supports matrices with general strides. Uses a microkernel strategy, so that the implementation is easy to parallelize and optimize. `RUSTFLAGS=\"-C target-cpu=native\"` is your friend here."
