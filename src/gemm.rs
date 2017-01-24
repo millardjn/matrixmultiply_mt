@@ -291,13 +291,15 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 					bpp: *mut T,
 					a: *const T,
 					c: *mut T,
-					pair: *mut (Mutex<bool>, Condvar, AtomicUsize),
+					loop_counter: *mut AtomicUsize,
+					sync: *mut (Mutex<bool>, Condvar, AtomicUsize),
 				}
 				unsafe impl<T: Element> Send for Ptrs<T> {}
 
 				// Threads decrement the atomic int and move on to other work, last thread out flips the mutex/condvar
 				// This is likely a useless micro optimisation, but might be useful if the threadpool is large & shared & stressed and workloads are small?
-				let mut pair = (Mutex::new(false), Condvar::new(), AtomicUsize::new(num_threads));    
+				let mut sync = (Mutex::new(false), Condvar::new(), AtomicUsize::new(num_threads));    
+				let mut loop_counter = AtomicUsize::new(0);
 
 				for cpu_id in 0..num_threads {
 					let p = Ptrs::<K::T> {
@@ -305,7 +307,8 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 						bpp: bpp,
 						a: a,
 						c: c,
-						pair: &mut pair as *mut _,
+						loop_counter: &mut loop_counter as *mut _,
+						sync: &mut sync as *mut _,
 					};
 
 					pool.execute(move || {
@@ -313,14 +316,15 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 						let app = p.app;
 						let a = p.a;
 						let c = p.c;
-						let &mut(ref lock, ref cvar, ref counter) = p.pair.as_mut().unwrap();
+						let &mut(ref lock, ref cvar, ref counter) = p.sync.as_mut().unwrap();
 
-
+						let mut next_id = p.loop_counter.as_mut().unwrap().fetch_add(1, Ordering::Relaxed);
 						// LOOP 3: split m into mc parts
 						for (l3, mc) in range_chunk(m, cmc) {
-							if l3 % num_threads != cpu_id {continue;} // threads leapfrog each other
+							
+							if l3 < next_id {continue;}
 
-							dprint!("LOOP 3, {}, mc={}", l3, mc);
+							dprint!("LOOP 3, {}, mc={}, id={}", l3, mc);
 							let a = a.stride_offset(rsa, cmc * l3);
 							let c = c.stride_offset(rsc, cmc * l3);
 
@@ -332,9 +336,11 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 
 							// LOOP 2 and 1
 							gemm_packed::<K>(nc, kc, mc, alpha, app, bpp, betap, c, rsc, csc);
+
+							next_id = p.loop_counter.as_mut().unwrap().fetch_add(1, Ordering::Relaxed);
 						}
 
-						let x = counter.fetch_sub(1, Ordering::Relaxed);
+						let x = counter.fetch_sub(1, Ordering::AcqRel);
 						if x == 1 {
 							*lock.lock().unwrap() = true;
 							cvar.notify_one();
@@ -344,7 +350,7 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 				  
 				}
 
-				let &(ref lock, ref cvar, _) = &pair;
+				let &(ref lock, ref cvar, _) = &sync;
 				let mut finished = lock.lock().unwrap();
 				while !*finished {
 					finished = cvar.wait(finished).unwrap();
