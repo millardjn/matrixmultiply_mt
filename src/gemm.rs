@@ -223,7 +223,7 @@ fn get_num_threads_and_cmc<C: CacheConfig, K: KernelConfig>(m: usize, k: usize, 
 	};
 
 	debug_assert!(mc <= max_mc_bands* K::MR::to_usize(), "mc{} min{} max{}", mc, min_split_mc_bands, max_mc_bands);
-	
+	debug_assert!(num_threads <= *NUM_CPUS);
 	debug_assert_eq!(0, mc % K::MR::to_usize());
 
 	(num_threads, mc)
@@ -298,7 +298,7 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 
 				// Threads decrement the atomic int and move on to other work, last thread out flips the mutex/condvar
 				// This is likely a useless micro optimisation, but might be useful if the threadpool is large & shared & stressed and workloads are small?
-				let mut sync = (Mutex::new(false), Condvar::new(), AtomicUsize::new(num_threads));    
+				let mut sync = (Mutex::new(false), Condvar::new(), AtomicUsize::new(num_threads));
 				let mut loop_counter = AtomicUsize::new(0);
 
 				for cpu_id in 0..num_threads {
@@ -316,9 +316,9 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 						let app = p.app;
 						let a = p.a;
 						let c = p.c;
-						let &mut(ref lock, ref cvar, ref counter) = p.sync.as_mut().unwrap();
+						let (ref lock, ref cvar, ref thread_counter) = *p.sync;
 
-						let mut next_id = p.loop_counter.as_mut().unwrap().fetch_add(1, Ordering::Relaxed);
+						let mut next_id = (*p.loop_counter).fetch_add(1, Ordering::AcqRel);
 						// LOOP 3: split m into mc parts
 						for (l3, mc) in range_chunk(m, cmc) {
 							
@@ -337,13 +337,13 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 							// LOOP 2 and 1
 							gemm_packed::<K>(nc, kc, mc, alpha, app, bpp, betap, c, rsc, csc);
 
-							next_id = p.loop_counter.as_mut().unwrap().fetch_add(1, Ordering::Relaxed);
+							next_id = (*p.loop_counter).fetch_add(1, Ordering::AcqRel);
 						}
 
-						let x = counter.fetch_sub(1, Ordering::AcqRel);
+						let x = thread_counter.fetch_sub(1, Ordering::SeqCst);
 						if x == 1 {
 							*lock.lock().unwrap() = true;
-							cvar.notify_one();
+							cvar.notify_all();
 						}
 
 					});
