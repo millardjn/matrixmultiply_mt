@@ -350,12 +350,12 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 				  
 				}
 
-				let &(ref lock, ref cvar, _) = &sync;
+				let (ref lock, ref cvar, ref thread_counter) = sync;
 				let mut finished = lock.lock().unwrap();
 				while !*finished {
 					finished = cvar.wait(finished).unwrap();
 				}
-
+				debug_assert!(thread_counter.load(Ordering::SeqCst) == 0);
 			} else {
 				let app = app_base;
 				for (l3, mc) in range_chunk(m, cmc) {
