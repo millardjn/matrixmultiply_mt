@@ -71,7 +71,7 @@ impl KernelConfig for DgemmAVX2x8 {
 pub struct SgemmCache;
 impl CacheConfig for SgemmCache{
 	type A = U64;
-	type MT = U64;
+	type MT = U128;
 	type MC = U64;
 	type NC = U1024;
 	type KC = U256;
@@ -80,7 +80,7 @@ impl CacheConfig for SgemmCache{
 pub struct DgemmCache;
 impl CacheConfig for DgemmCache{
 	type A = U64;
-	type MT = U64;
+	type MT = U128;
 	type MC = U32;
 	type NC = U512;
 	type KC = U256;
