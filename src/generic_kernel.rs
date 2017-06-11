@@ -10,10 +10,11 @@
 use typenum::Unsigned;
 use typenum_loops::Loop;
 use generic_params::*;
-use num_traits::identities::One;
 use std::cmp::min;
+use num_traits::Float;
+use super::prefetch;
 
-#[inline(always)]
+
 /// Call the GEMM kernel with a "masked" output C.
 ///
 /// Simply redirect the MR by NR kernel output to the passed
@@ -22,6 +23,7 @@ use std::cmp::min;
 ///
 /// + rows: rows of kernel unmasked
 /// + cols: cols of kernel unmasked
+#[inline(always)]
 pub unsafe fn masked_kernel<K: KernelConfig>(k: usize,
 							  alpha: K::T,
 							  a: *const K::T,
@@ -34,14 +36,24 @@ pub unsafe fn masked_kernel<K: KernelConfig>(k: usize,
 {
 	let mr = min(K::MR::to_usize(), rows);
 	let nr = min(K::NR::to_usize(), cols);
-	let one = <K::T as One>::one();
-	let ab = kernel_compute::<K>(k, one, a, b);
-	for j in 0..nr {
-		for i in 0..mr {
-			//if i < rows && j < cols {
+	prefetch(a as *mut i8, 0, 0, 1);
+	prefetch(b as *mut i8, 0, 0, 1); // addr, read, nonlocal, data
+	write_prefetch::<K>(c, rsc, csc);
+	if K::TR::to_usize() == 0 {
+		let ab = kernel_compute::<K>(k, alpha, a, b);
+		for j in 0..nr {
+			for i in 0..mr {
 				let cptr = c.offset(rsc * i as isize + csc * j as isize);
-				*cptr = *cptr + alpha * ab[i][j];
-			//}
+				*cptr = *cptr + ab[i][j];
+			}
+		}
+	} else {
+		let ab = kernel_compute_trans::<K>(k, alpha, a, b);
+		for j in 0..nr {
+			for i in 0..mr {
+				let cptr = c.offset(rsc * i as isize + csc * j as isize);
+				*cptr = *cptr + ab[j][i];
+			}
 		}
 	}
 }
@@ -66,10 +78,16 @@ pub unsafe fn kernel<K: KernelConfig>(k: usize,
 					c: *mut K::T,
 					rsc: isize,
 					csc: isize) {
-
+	prefetch(a as *mut i8, 0, 0, 1);
+	prefetch(b as *mut i8, 0, 0, 1); // addr, read, nonlocal, data
+	write_prefetch::<K>(c, rsc, csc);
+	if K::TR::to_usize() == 0 {
 		let ab = kernel_compute::<K>(k, alpha, a, b);
-	
-		kernel_write::<K>(c, rsc, csc, &ab);		
+		kernel_write::<K>(c, rsc, csc, &ab);
+	} else {
+		let ab = kernel_compute_trans::<K>(k, alpha, a, b);
+		kernel_write_trans::<K>(c, rsc, csc, &ab);
+	}
 
 }
 
@@ -84,9 +102,33 @@ unsafe fn kernel_compute<K: KernelConfig>(k: usize, alpha: K::T, a: *const K::T,
 	K::KU::partial_unroll(k, |l|{
 		let a = a.offset((l*K::MR::to_usize()) as isize);
 		let b = b.offset((l*K::NR::to_usize()) as isize);
+
+		prefetch(a.offset(128) as *mut i8, 0, 0, 1);
+		prefetch(b.offset(128) as *mut i8, 0, 0, 1); // addr, read, nonlocal, data
+
+
+		// if K::FMA::to_usize() > 0 {
+		// 	K::MR::full_unroll(|i|{
+		// 		K::NR::full_unroll(|j|{
+		// 			ab[i][j] = at::<K::T>(a, i).mul_add(at::<K::T>(b, j), ab[i][j]);
+		// 		});
+		// 	});
+		// } else {
+		// 	K::MR::full_unroll(|i|{
+		// 		K::NR::full_unroll(|j|{
+		// 			ab[i][j] = ab[i][j] + at::<K::T>(a, i) * at::<K::T>(b, j);
+		// 		});
+		// 	});
+		// }
+
+
 		K::MR::full_unroll(|i|{
 			K::NR::full_unroll(|j|{
-				ab[i][j] = ab[i][j] + at::<K>(a, i) * at::<K>(b, j);
+				if K::FMA::to_usize() > 0 {
+					ab[i][j] = at::<K::T>(a, i).mul_add(at::<K::T>(b, j), ab[i][j]);
+				} else {
+					ab[i][j] = ab[i][j] + at::<K::T>(a, i) * at::<K::T>(b, j);
+				}
 			});
 		});
 	});
@@ -98,6 +140,61 @@ unsafe fn kernel_compute<K: KernelConfig>(k: usize, alpha: K::T, a: *const K::T,
 	});	
 
 	ab
+}
+
+/// Split out compute for better vectorisation
+#[inline(never)]
+unsafe fn kernel_compute_trans<K: KernelConfig>(k: usize, alpha: K::T, a: *const K::T, b: *const K::T) -> GA<GA<K::T, K::MR>, K::NR>{
+
+	// Compute matrix multiplication into ab[i][j]
+	let mut ab = <GA<GA<K::T, K::MR>, K::NR>>::default();
+
+	K::KU::partial_unroll(k, |l|{
+		let a = a.offset((l*K::MR::to_usize()) as isize);
+		let b = b.offset((l*K::NR::to_usize()) as isize);
+
+		prefetch(b.offset(128) as *mut i8, 0, 0, 1);
+		prefetch(a.offset(128) as *mut i8, 0, 0, 1); // addr, read, nonlocal, data
+
+		K::MR::full_unroll(|i|{
+			K::NR::full_unroll(|j|{
+				if K::FMA::to_usize() > 0 {
+					ab[j][i] = at::<K::T>(a, i).mul_add(at::<K::T>(b, j), ab[j][i]);
+				} else {
+					ab[j][i] = ab[j][i] + at::<K::T>(a, i) * at::<K::T>(b, j);
+				}
+			});
+		});
+	});
+
+	K::MR::full_unroll(|i|{
+		K::NR::full_unroll(|j|{
+			ab[j][i] = ab[j][i]*alpha;
+		});	
+	});	
+
+	ab
+}
+
+/// prefetch locations of C which will be written too
+#[inline(always)]
+unsafe fn write_prefetch<K: KernelConfig>(c: *mut K::T, rsc: isize, csc: isize) {
+
+	if rsc == 1 {
+		K::NR::full_unroll(|j|{
+			prefetch(c.offset(csc * j as isize) as *mut i8, 1, 0, 1); // addr, write, nonlocal, data
+		});	
+	} else if csc == 1 {
+		K::MR::full_unroll(|i|{
+			prefetch(c.offset(rsc * i as isize) as *mut i8, 1, 0, 1); // addr, write, nonlocal, data
+		});	
+	} else {
+		for i in 0..K::MR::to_usize() {
+			for j in 0..K::NR::to_usize() {
+				prefetch(c.offset(rsc * i as isize + csc * j as isize) as *mut i8, 1, 0, 1); // addr, write, nonlocal, data
+			}
+		}
+	}
 }
 
 /// Choose writes to C in a cache/vectorisation friendly manner if possible
@@ -131,7 +228,38 @@ unsafe fn kernel_write<K: KernelConfig>(c: *mut K::T, rsc: isize, csc: isize, ab
 
 }
 
+/// Choose writes to C in a cache/vectorisation friendly manner if possible
 #[inline(always)]
-unsafe fn at<K: KernelConfig>(ptr: *const K::T, i: usize) -> K::T {
+unsafe fn kernel_write_trans<K: KernelConfig>(c: *mut K::T, rsc: isize, csc: isize, ab: & GA<GA<K::T, K::MR>, K::NR>) {
+
+	if rsc == 1 {
+		K::NR::full_unroll(|j|{
+			K::MR::full_unroll(|i|{
+				let v = c.offset(1 * i as isize + csc * j as isize);
+				*v = *v + ab[j][i];
+			});	
+		});	
+		
+	} else if csc == 1 {
+		K::NR::full_unroll(|j|{
+			K::MR::full_unroll(|i|{
+				let v = c.offset(rsc * i as isize + 1 * j as isize);
+				*v = *v + ab[j][i];
+			});	
+		});	
+		
+	} else {
+		for j in 0..K::NR::to_usize() {
+			for i in 0..K::MR::to_usize() {
+				let v = c.offset(rsc * i as isize + csc * j as isize);
+				*v = *v + ab[j][i];
+			}
+		}
+	}
+
+}
+
+#[inline(always)]
+unsafe fn at<T: Copy>(ptr: *const T, i: usize) -> T {
 	*ptr.offset(i as isize)
 }

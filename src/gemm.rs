@@ -15,17 +15,46 @@ use std::sync::atomic::{Ordering, AtomicUsize};
 use std::cmp::{min, max};
 use std::mem::size_of;
 use std::mem::align_of;
-use std::mem;
 use util::range_chunk;
 use util::round_up_to;
 use util::round_up_div;
 
 use rawpointer::PointerExt;
-use typenum::{Unsigned, U4, U2};
+use typenum::{Unsigned, U4};
 use generic_params::*;
 use generic_kernel;
 use typenum_loops::Loop;
 use num_traits::identities::{One, Zero};
+use {sse_stmxcsr, sse_ldmxcsr};
+use snb_kernels;
+use hwl_kernels;
+use std::intrinsics::atomic_singlethreadfence;
+
+/// If 'ftz_daz' feature is not enabled this does nothing and returns 0.
+/// Sets the ftz and daz bits of the mxcsr register, zeroing input and result subnormal floats.
+/// Returns the current mxcsr register value, which should be restored at a later time by reset_ftz_and_daz();
+fn set_ftz_and_daz() -> i32 {
+	if cfg!(ftz_daz) {
+		let mut old_mxcsr = 0i32;
+		unsafe{sse_stmxcsr(&mut old_mxcsr as *mut i32 as *mut i8)};
+		let mut new_mxcsr = old_mxcsr | 0x8040;
+		unsafe{sse_ldmxcsr(&mut new_mxcsr as *mut i32 as *mut i8)};
+		unsafe{atomic_singlethreadfence()};// prevent this being moved backward after floating point operations
+		old_mxcsr
+	} else {
+		0
+	}
+}
+
+/// If 'ftz_daz' feature is not enabled this does nothing.
+/// Set the mxcsr register back to its previous value
+fn reset_ftz_and_daz(mut old_mxcsr: i32){
+	if cfg!(ftz_daz) {
+		unsafe{atomic_singlethreadfence()};// prevent this being moved forward infront of floating point operations
+		unsafe{sse_ldmxcsr(&mut old_mxcsr as *mut i32 as *mut i8)};
+	}
+}
+
 
 lazy_static! {
 	static ref NUM_CPUS: usize = num_cpus::get();
@@ -62,9 +91,26 @@ pub unsafe fn sgemm(m: usize,
 					c: *mut f32,
 					rsc: isize,
 					csc: isize) {
+	if k == 0 || m == 0 || n == 0 {
+		return;
+	}
+	let (m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc) = if n > m {
+			(n, k, m, b, csb, rsb, a, csa, rsa, c, csc, rsc)
+		} else {
+			(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc)
+		};
 
-	gemm::<SgemmCache, SgemmAVX16x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
-
+	if cfg!(arch_haswell) {
+		hwl_kernels::sgemm(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+	} else if cfg!(arch_sandybridge) {
+		snb_kernels::sgemm(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+	} else if cfg!(arch_penryn) {
+		unimplemented!();
+	} else if cfg!(arch_generic4x4fma) {
+		gemm_loop::<SgemmCache, S4x4fma>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+	} else {//arch_generic4x4
+		gemm_loop::<SgemmCache, S4x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+	}
 }
 
 /// General matrix multiplication (f64)
@@ -97,78 +143,24 @@ pub unsafe fn dgemm(m: usize,
 					c: *mut f64,
 					rsc: isize,
 					csc: isize) {
-
-	gemm::<DgemmCache, DgemmAVX8x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
-}
-
-/// General matrix multiplication (num::Num)
-/// The type parameter `K` is the gemm microkernel configuration.
-/// The type parameter `C` is the outer gemm cache blocking configuration.
-
-/// C ← α A B + β C
-///
-/// + m, k, n: dimensions
-/// + a, b, c: pointer to the first element in the matrix
-/// + A: m by k matrix
-/// + B: k by n matrix
-/// + C: m by n matrix
-/// + rs<em>x</em>: row stride of *x*
-/// + cs<em>x</em>: col stride of *x*
-///
-/// Strides for A and B may be arbitrary. Strides for C must not result in
-/// elements that alias each other, for example they can not be zero.
-///
-/// If β is zero, then C does not need to be initialized.
-pub unsafe fn gemm<C: CacheConfig, K: KernelConfig>(m: usize,
-					   k: usize,
-					   n: usize,
-					   alpha: K::T,
-					   a: *const K::T,
-					   rsa: isize,
-					   csa: isize,
-					   b: *const K::T,
-					   rsb: isize,
-					   csb: isize,
-					   beta: K::T,
-					   c: *mut K::T,
-					   rsc: isize,
-					   csc: isize)
-{
+	if k == 0 || m == 0 || n == 0 {return;
+	}
 	let (m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc) = if n > m {
 			(n, k, m, b, csb, rsb, a, csa, rsa, c, csc, rsc)
 		} else {
 			(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc)
 		};
 
-
-	if <K::R as KernelConfig>::NR::to_usize() < K::NR::to_usize() && n <= <K::R as KernelConfig>::NR::to_usize(){
-		assert_eq!(size_of::<K::T>(), size_of::<<K::R as KernelConfig>::T>());
-		// So this is insanely unsafe. While the types K::T and K::R::T have to be the same size, they may be completely different types
-		gemm::<C, K::R>(m, k, n, mem::transmute_copy(&alpha), mem::transmute(a), rsa, csa, mem::transmute(b), rsb, csb, mem::transmute_copy(&beta), mem::transmute(c), rsc, csc)
-	
-	}else if n*m*k < 2*((min(n, K::NR::to_usize()) + min(m, K::MR::to_usize()))*k + min(n, K::NR::to_usize())*min(m, K::MR::to_usize())) {
-
-		U2::partial_unroll(m, |i|{
-			U2::partial_unroll(n, |j|{
-				let celt = c.offset((i as isize * rsc + j as isize *csc) );
-				*celt = if beta.is_zero() {K::T::zero()} else {*celt * beta};
-				U2::partial_unroll(k, |x|{
-					*celt = *celt + *a.offset(i as isize  * rsa + x as isize  * csa) * *b.offset(x as isize  * rsb + j as isize  * csb) * alpha;
-				});
-			});
-		});
-	}else {
-		let (same_threads, _) = get_num_threads_and_cmc::<C, K>(m, K::MR::to_usize(), C::MC::to_usize());
-		let (flip_threads, _) = get_num_threads_and_cmc::<C, K>(n, K::MR::to_usize(), C::MC::to_usize());
-
-		// Flip matrix multiply to make maximise multithreadingon rectangular C, otherwise flip if it makes iteration over C more cache friendly
-		// Tradeoff between multithreading and iteration order could be made more intelligently, e.g. include roofline models
-		let (m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc) = if flip_threads > same_threads || (flip_threads == same_threads && rsc.abs() < csc.abs()) {
-				(n, k, m, b, csb, rsb, a, csa, rsa, c, csc, rsc)
-			} else {
-				(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc)
-			};
-		gemm_loop::<C, K>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
+	if cfg!(arch_haswell) {
+		hwl_kernels::dgemm(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
+	} else if cfg!(arch_sandybridge) {
+		snb_kernels::dgemm(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
+	} else if cfg!(arch_penryn) {
+		unimplemented!();
+	} else if cfg!(arch_generic4x4fma) {
+		gemm_loop::<DgemmCache, D2x4fma>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+	} else {//arch_generic4x4
+		gemm_loop::<DgemmCache, D2x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
 	}
 }
 
@@ -181,24 +173,24 @@ pub unsafe fn gemm<C: CacheConfig, K: KernelConfig>(m: usize,
 /// * dont let `cmc*min(C:KC, k)*min(C:NC, n)` go below `C:MC*C:KC*C:NC/C:MT` avoid excessive synchronisation costs
 /// * `cmc` must be divisible by `kmr`
 /// * dont let `cmc*min(C:KC, k)` go above `C:MC*C:KC` still fit in cache
-fn get_num_threads_and_cmc<C: CacheConfig, K: KernelConfig>(m: usize, k: usize, n: usize) -> (usize, usize){
+fn get_num_threads_and_cmc<C: CacheConfig<K>, K: KernelConfig>(m: usize, k: usize, n: usize) -> (usize, usize){
 
 	let m_bands = round_up_div(m, K::MR::to_usize());
 
 	// maximum bound mc is that the ~A block must be less than the maximum size
 	let max_mc_bands = {
-		let max_size = C::KC::to_usize() * C::MC::to_usize();
-		let max_kc = max(min(k, C::KC::to_usize()), 1);
-		(max_size / max_kc + C::MC::to_usize())/(K::MR::to_usize()*2)
+		let max_size = C::kc() * C::mc();
+		let max_kc = max(min(k, C::kc()), 1);
+		(max_size / max_kc + C::mc())/(K::MR::to_usize()*2)
 	};
 
 	// minimum bound on mc before splitting over threads is some fraction of the max compute per ~A cache block
 	let min_split_mc_bands = min(max_mc_bands, {
-		let max_compute = C::MC::to_usize() * C::KC::to_usize() * C::NC::to_usize();
-		let min_compute = max(max_compute/C::MT::to_usize(), 1);
+		let max_compute = C::mc() * C::kc() * C::nc();
+		let min_compute = max(max_compute/C::multithread_factor(), 1);
 
-		let max_kc = max(min(k, C::KC::to_usize()), 1);
-		let max_nc = max(min(round_up_to(n, K::NR::to_usize()), C::NC::to_usize()), 1);
+		let max_kc = max(min(k, C::kc()), 1);
+		let max_nc = max(min(round_up_to(n, K::NR::to_usize()), C::nc()), 1);
 
 		round_up_div(round_up_div(min_compute, max_nc * max_kc), K::MR::to_usize())
 	});
@@ -232,7 +224,7 @@ fn get_num_threads_and_cmc<C: CacheConfig, K: KernelConfig>(m: usize, k: usize, 
 /// Implement matrix multiply using packed buffers and a microkernel strategy
 /// The type parameter `K` is the gemm microkernel configuration.
 /// The type parameter `C` is the outer gemm cache blocking configuration.
-unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
+pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 					   k: usize,
 					   n: usize,
 					   alpha: K::T,
@@ -251,8 +243,8 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 	debug_assert!(m * n == 0 || (rsc != 0 && csc != 0));
 	let knr = K::NR::to_usize();
 	let kmr = K::MR::to_usize();
-	let cnc = C::NC::to_usize();
-	let ckc = C::KC::to_usize();
+	let cnc = C::nc();
+	let ckc = C::kc();
 	let (num_threads, cmc) = get_num_threads_and_cmc::<C, K>(m, k, n);
 
 	assert_eq!(0, cnc % knr);
@@ -264,7 +256,7 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 		None
 	};
 
-	let (_vec , app_stride, app_base, bpp) = aligned_packing_vec::<K>(m, k, n, cmc, ckc, cnc, C::A::to_usize(), num_threads);
+	let (_vec , app_stride, app_base, bpp) = aligned_packing_vec::<K>(m, k, n, cmc, ckc, cnc, C::alignment(), num_threads);
 	
 	// LOOP 5: split n into nc parts
 	for (l5, nc) in range_chunk(n, cnc) {
@@ -318,7 +310,8 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 						let c = p.c;
 						let (ref lock, ref cvar, ref thread_counter) = *p.sync;
 
-						let mut next_id = (*p.loop_counter).fetch_add(1, Ordering::AcqRel);
+						let mut next_id = (*p.loop_counter).fetch_add(1, Ordering::Relaxed);
+						let mxcsr = set_ftz_and_daz();
 						// LOOP 3: split m into mc parts
 						for (l3, mc) in range_chunk(m, cmc) {
 							
@@ -337,15 +330,15 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 							// LOOP 2 and 1
 							gemm_packed::<K>(nc, kc, mc, alpha, app, bpp, betap, c, rsc, csc);
 
-							next_id = (*p.loop_counter).fetch_add(1, Ordering::AcqRel);
+							next_id = (*p.loop_counter).fetch_add(1, Ordering::Relaxed);
 						}
-
-						let x = thread_counter.fetch_sub(1, Ordering::SeqCst);
+						
+						let x = thread_counter.fetch_sub(1, Ordering::AcqRel);
 						if x == 1 {
 							*lock.lock().unwrap() = true;
 							cvar.notify_all();
 						}
-
+						reset_ftz_and_daz(mxcsr);
 					});
 				  
 				}
@@ -358,6 +351,7 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 				debug_assert!(thread_counter.load(Ordering::SeqCst) == 0);
 			} else {
 				let app = app_base;
+				let mxcsr = set_ftz_and_daz();
 				for (l3, mc) in range_chunk(m, cmc) {
 
 					dprint!("LOOP 3, {}, mc={}", l3, mc);
@@ -373,6 +367,7 @@ unsafe fn gemm_loop<C: CacheConfig, K: KernelConfig>(m: usize,
 					// LOOP 2 and 1
 					gemm_packed::<K>(nc, kc, mc, alpha, app, bpp, betap, c, rsc, csc);
 				}
+				reset_ftz_and_daz(mxcsr);
 			}
 
 		}
@@ -604,9 +599,7 @@ unsafe fn pack<T: Element, MR: Loop>(kc: usize,
 		let row_offset = (mc / mr) * mr;
 		//for j in 0..kc {
 		U4::partial_unroll(kc,|j|{
-
 			MR::full_unroll(|i|{
-			//for i in 0..mr {
 				if i < rest {
 					*pack = *a.stride_offset(rsa, i + row_offset)
 							  .stride_offset(csa, j);
