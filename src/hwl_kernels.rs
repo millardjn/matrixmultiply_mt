@@ -66,9 +66,9 @@ pub unsafe fn sgemm(m: usize,
 	}
 
 	if n > 28 && csc == 1 {
-		gemm::gemm_loop::<SgemmCache, S6x16>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		gemm::gemm_loop::<SgemmCache, S4x16>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
 	} else {
-		gemm::gemm_loop::<SgemmCache, S16x6t>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		gemm::gemm_loop::<SgemmCache, S16x4t>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
 	}
 
 }
@@ -110,9 +110,9 @@ pub unsafe fn dgemm(m: usize,
 	}
 
 	if n > 28 && csc == 1 {
-		gemm::gemm_loop::<DgemmCache, D6x8>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		gemm::gemm_loop::<DgemmCache, D4x8>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
 	} else {
-		gemm::gemm_loop::<DgemmCache, D8x6t>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		gemm::gemm_loop::<DgemmCache, D8x4t>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
 	}
 }
 
@@ -122,7 +122,7 @@ impl KernelConfig for S8x8 {
 	type T = f32;
 	type MR = U8;
 	type NR = U8;
-	type KU = U5;
+	type KU = U8;//
 	type TR = U0;
 	type FMA = U1;
 }
@@ -133,7 +133,7 @@ impl KernelConfig for S8x8t {
 	type T = f32;
 	type MR = U8;
 	type NR = U8;
-	type KU = U5;
+	type KU = U8;//
 	type TR = U1;
 	type FMA = U1;
 }
@@ -148,13 +148,23 @@ impl KernelConfig for S6x16 {
 	type FMA = U1;
 }
 
+pub struct S5x16; // 10 avx registers
+impl KernelConfig for S5x16 {
+	type T = f32;
+	type MR = U5;
+	type NR = U16;
+	type KU = U8; //8
+	type TR = U0;
+	type FMA = U1;
+}
+
 #[allow(unused)]
 pub struct S4x16; // 8 avx registers
 impl KernelConfig for S4x16 {
 	type T = f32;
 	type MR = U4;
 	type NR = U16;
-	type KU = U5;
+	type KU = U8;//5
 	type TR = U0;
 	type FMA = U1;
 }
@@ -165,7 +175,7 @@ impl KernelConfig for S8x7t {
 	type T = f32;
 	type MR = U8;
 	type NR = U7;
-	type KU = U5;
+	type KU = U8;//5
 	type TR = U1;
 	type FMA = U1;
 }
@@ -186,7 +196,7 @@ impl KernelConfig for S16x5t {
 	type T = f32;
 	type MR = U16;
 	type NR = U5;
-	type KU = U4;
+	type KU = U8;// 4
 	type TR = U1;
 	type FMA = U1;
 }
@@ -196,7 +206,7 @@ impl KernelConfig for S16x4t {
 	type T = f32;
 	type MR = U16;
 	type NR = U4;
-	type KU = U5;
+	type KU = U8;//5
 	type TR = U1;
 	type FMA = U1;
 }
@@ -240,7 +250,7 @@ impl KernelConfig for D8x4 {
 	type T = f64;
 	type MR = U8;
 	type NR = U4;
-	type KU = U5;
+	type KU = U8;// 5
 	type TR = U0;
 	type FMA = U1;
 }
@@ -251,7 +261,7 @@ impl KernelConfig for D4x8t {
 	type T = f64;
 	type MR = U4;
 	type NR = U8;
-	type KU = U5;
+	type KU = U8;// 5
 	type TR = U1;
 	type FMA = U1;
 }
@@ -266,13 +276,23 @@ impl KernelConfig for D6x8 {
 	type FMA = U1;
 }
 
+pub struct D5x8; // 8 avx registers
+impl KernelConfig for D5x8 {
+	type T = f64;
+	type MR = U5;
+	type NR = U8;
+	type KU = U4;
+	type TR = U0;
+	type FMA = U1;
+}
+
 #[allow(unused)]
 pub struct D4x8; // 8 avx registers
 impl KernelConfig for D4x8 {
 	type T = f64;
 	type MR = U4;
 	type NR = U8;
-	type KU = U5;
+	type KU = U8;//5
 	type TR = U0;
 	type FMA = U1;
 }
@@ -355,7 +375,7 @@ impl KernelConfig for D16x1t {
 
 pub struct SgemmCache;
 impl CacheConfigValues for SgemmCache{
-	type A = U64;
+	type A = U32;
 	type MT = U128;
 	type MC = U64;
 	type NC = U1024;
@@ -364,7 +384,7 @@ impl CacheConfigValues for SgemmCache{
 
 pub struct DgemmCache;
 impl CacheConfigValues for DgemmCache{
-	type A = U64;
+	type A = U32;
 	type MT = U128;
 	type MC = U32;
 	type NC = U512;

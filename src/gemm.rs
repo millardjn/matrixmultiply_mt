@@ -20,7 +20,7 @@ use util::round_up_to;
 use util::round_up_div;
 
 use rawpointer::PointerExt;
-use typenum::{Unsigned, U4};
+use typenum::{Unsigned, U4, U8};
 use generic_params::*;
 use generic_kernel;
 use typenum_loops::Loop;
@@ -559,37 +559,153 @@ unsafe fn pack<T: Element, MR: Loop>(kc: usize,
 {
 	
 	debug_assert_eq!(mr, MR::to_usize());
+	
+
+
+
+	if csa == 1 {
+		part_pack_row_major::<T, MR>(kc, mc, mr, pack, a, rsa, csa);
+	} else if rsa == 1 {
+		part_pack_col_major::<T, MR>(kc, mc, mr, pack, a, rsa, csa);
+	} else {
+		part_pack_strided::<T, MR>(kc, mc, mr, pack, a, rsa, csa);
+	}
+
+	part_pack_end::<T, MR>(kc, mc, mr, pack, a, rsa, csa);
+}
+
+/// Pack matrix into `pack`
+/// Variable notation refers to packing ~A. for ~B mr = NR::to_usize
+///
+/// + kc: length of the micropanel
+/// + mc: number of rows/columns in the matrix to be packed
+/// + mr: kernel rows/columns that we round up to
+/// + rsa: row stride
+/// + csa: column stride
+/// + zero: zero element to pad with
+#[inline(never)]
+unsafe fn part_pack_row_major<T: Element, MR: Loop>(kc: usize,
+				  mc: usize,
+				  mr: usize,
+				  pack: *mut T,
+				  a: *const T,
+				  rsa: isize,
+				  csa: isize)
+{
+	
+	debug_assert_eq!(mr, MR::to_usize());
+	debug_assert_eq!(csa, 1);
+	let csa = 1usize;
+	let rsa = rsa as usize;
 	let mr = MR::to_usize();
 
 	for ir in 0..mc / mr {
-		let a = a.stride_offset(rsa, ir * mr);
+		let a = a.offset((rsa * ir * mr) as isize);
 		let pack = pack.offset((ir * mr * kc) as isize);
-		if csa == 1 {
-			U4::partial_unroll(kc,|j|{
-				MR::full_unroll(|i|{
-					let pack = pack.offset((j*mr+i)as isize);
-					*pack = *a.stride_offset(rsa, i)
-							.stride_offset(1, j);
-				});
-			});
-		} else if rsa == 1 {
-			U4::partial_unroll(kc,|j|{
-				MR::full_unroll(|i|{
-					let pack = pack.offset((j*mr+i)as isize);
-					*pack = *a.stride_offset(1, i)
-							.stride_offset(csa, j);
-				});
-			});
-		} else {
-			U4::partial_unroll(kc,|j|{
-				MR::full_unroll(|i|{
-					let pack = pack.offset((j*mr+i)as isize);
-					*pack = *a.stride_offset(rsa, i)
-							.stride_offset(csa, j);
-				});
+		for j in 0..kc{
+			MR::full_unroll(|i|{
+				let pack = pack.offset((j*mr+i)as isize);
+				*pack = *a.offset((rsa * i + csa * j) as isize);
 			});
 		}
 	}
+
+}
+
+/// Pack matrix into `pack`
+/// Variable notation refers to packing ~A. for ~B mr = NR::to_usize
+///
+/// + kc: length of the micropanel
+/// + mc: number of rows/columns in the matrix to be packed
+/// + mr: kernel rows/columns that we round up to
+/// + rsa: row stride
+/// + csa: column stride
+/// + zero: zero element to pad with
+#[inline(never)]
+unsafe fn part_pack_col_major<T: Element, MR: Loop>(kc: usize,
+				  mc: usize,
+				  mr: usize,
+				  pack: *mut T,
+				  a: *const T,
+				  rsa: isize,
+				  csa: isize)
+{
+	debug_assert_eq!(mr, MR::to_usize());
+	debug_assert_eq!(rsa, 1);
+	let rsa = 1usize;
+	let csa = csa as usize;
+	let mr = MR::to_usize();
+
+	for ir in 0..mc / mr {
+		let a = a.offset((rsa * ir * mr) as isize);
+		let pack = pack.offset((ir * mr * kc) as isize);
+		for j in 0..kc{
+			MR::full_unroll(|i|{
+				let pack = pack.offset((j*mr+i)as isize);
+				*pack = *a.offset((rsa * i + csa * j) as isize);
+			});
+		}
+	}
+
+}
+
+/// Pack matrix into `pack`
+/// Variable notation refers to packing ~A. for ~B mr = NR::to_usize
+///
+/// + kc: length of the micropanel
+/// + mc: number of rows/columns in the matrix to be packed
+/// + mr: kernel rows/columns that we round up to
+/// + rsa: row stride
+/// + csa: column stride
+/// + zero: zero element to pad with
+#[inline(never)]
+unsafe fn part_pack_strided<T: Element, MR: Loop>(kc: usize,
+				  mc: usize,
+				  mr: usize,
+				  pack: *mut T,
+				  a: *const T,
+				  rsa: isize,
+				  csa: isize)
+{
+	
+	debug_assert_eq!(mr, MR::to_usize());
+	let mr = MR::to_usize();
+	let csa = csa as usize;
+	let rsa = rsa as usize;
+
+	for ir in 0..mc / mr {
+		let a = a.offset((rsa * ir * mr) as isize);
+		let pack = pack.offset((ir * mr * kc) as isize);
+		for j in 0..kc{
+			MR::full_unroll(|i|{
+				let pack = pack.offset((j*mr+i)as isize);
+				*pack = *a.offset((rsa * i + csa * j) as isize);
+			});
+		}
+	}
+}
+
+/// Pack matrix into `pack`
+/// Variable notation refers to packing ~A. for ~B mr = NR::to_usize
+///
+/// + kc: length of the micropanel
+/// + mc: number of rows/columns in the matrix to be packed
+/// + mr: kernel rows/columns that we round up to
+/// + rsa: row stride
+/// + csa: column stride
+/// + zero: zero element to pad with
+#[inline(never)]
+unsafe fn part_pack_end<T: Element, MR: Loop>(kc: usize,
+				  mc: usize,
+				  mr: usize,
+				  pack: *mut T,
+				  a: *const T,
+				  rsa: isize,
+				  csa: isize)
+{
+	
+	debug_assert_eq!(mr, MR::to_usize());
+	let mr = MR::to_usize();
 
 	let mut pack = pack.offset(((mc/mr)*mr*kc) as isize);
 
@@ -597,8 +713,7 @@ unsafe fn pack<T: Element, MR: Loop>(kc: usize,
 	let rest = mc % mr;
 	if rest > 0 {
 		let row_offset = (mc / mr) * mr;
-		//for j in 0..kc {
-		U4::partial_unroll(kc,|j|{
+		U8::partial_unroll(kc,|j|{
 			MR::full_unroll(|i|{
 				if i < rest {
 					*pack = *a.stride_offset(rsa, i + row_offset)

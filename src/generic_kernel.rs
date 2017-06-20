@@ -6,14 +6,13 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-
+use std::intrinsics::atomic_singlethreadfence;
 use typenum::Unsigned;
 use typenum_loops::Loop;
 use generic_params::*;
 use std::cmp::min;
 use num_traits::Float;
 use super::prefetch;
-
 
 /// Call the GEMM kernel with a "masked" output C.
 ///
@@ -36,8 +35,8 @@ pub unsafe fn masked_kernel<K: KernelConfig>(k: usize,
 {
 	let mr = min(K::MR::to_usize(), rows);
 	let nr = min(K::NR::to_usize(), cols);
-	prefetch(a as *mut i8, 0, 0, 1);
-	prefetch(b as *mut i8, 0, 0, 1); // addr, read, nonlocal, data
+	prefetch(a as *mut i8, 0, 3, 1);
+	prefetch(b as *mut i8, 0, 3, 1); // addr, read, nonlocal, data
 	write_prefetch::<K>(c, rsc, csc);
 	if K::TR::to_usize() == 0 {
 		let ab = kernel_compute::<K>(k, alpha, a, b);
@@ -78,8 +77,8 @@ pub unsafe fn kernel<K: KernelConfig>(k: usize,
 					c: *mut K::T,
 					rsc: isize,
 					csc: isize) {
-	prefetch(a as *mut i8, 0, 0, 1);
-	prefetch(b as *mut i8, 0, 0, 1); // addr, read, nonlocal, data
+	prefetch(a as *mut i8, 0, 3, 1);
+	prefetch(b as *mut i8, 0, 3, 1); // addr, read, nonlocal, data
 	write_prefetch::<K>(c, rsc, csc);
 	if K::TR::to_usize() == 0 {
 		let ab = kernel_compute::<K>(k, alpha, a, b);
@@ -100,27 +99,11 @@ unsafe fn kernel_compute<K: KernelConfig>(k: usize, alpha: K::T, a: *const K::T,
 	let mut ab = <GA<GA<K::T, K::NR>, K::MR>>::default();
 
 	K::KU::partial_unroll(k, |l|{
+		//unsafe{atomic_singlethreadfence()};
 		let a = a.offset((l*K::MR::to_usize()) as isize);
 		let b = b.offset((l*K::NR::to_usize()) as isize);
 
-		prefetch(a.offset(128) as *mut i8, 0, 0, 1);
-		prefetch(b.offset(128) as *mut i8, 0, 0, 1); // addr, read, nonlocal, data
-
-
-		// if K::FMA::to_usize() > 0 {
-		// 	K::MR::full_unroll(|i|{
-		// 		K::NR::full_unroll(|j|{
-		// 			ab[i][j] = at::<K::T>(a, i).mul_add(at::<K::T>(b, j), ab[i][j]);
-		// 		});
-		// 	});
-		// } else {
-		// 	K::MR::full_unroll(|i|{
-		// 		K::NR::full_unroll(|j|{
-		// 			ab[i][j] = ab[i][j] + at::<K::T>(a, i) * at::<K::T>(b, j);
-		// 		});
-		// 	});
-		// }
-
+		prefetch(a.offset(128) as *mut i8, 0, 3, 1);
 
 		K::MR::full_unroll(|i|{
 			K::NR::full_unroll(|j|{
@@ -131,6 +114,7 @@ unsafe fn kernel_compute<K: KernelConfig>(k: usize, alpha: K::T, a: *const K::T,
 				}
 			});
 		});
+		//unsafe{atomic_singlethreadfence()};
 	});
 
 	K::MR::full_unroll(|i|{
@@ -142,6 +126,7 @@ unsafe fn kernel_compute<K: KernelConfig>(k: usize, alpha: K::T, a: *const K::T,
 	ab
 }
 
+
 /// Split out compute for better vectorisation
 #[inline(never)]
 unsafe fn kernel_compute_trans<K: KernelConfig>(k: usize, alpha: K::T, a: *const K::T, b: *const K::T) -> GA<GA<K::T, K::MR>, K::NR>{
@@ -150,14 +135,15 @@ unsafe fn kernel_compute_trans<K: KernelConfig>(k: usize, alpha: K::T, a: *const
 	let mut ab = <GA<GA<K::T, K::MR>, K::NR>>::default();
 
 	K::KU::partial_unroll(k, |l|{
+		//unsafe{atomic_singlethreadfence()};
 		let a = a.offset((l*K::MR::to_usize()) as isize);
 		let b = b.offset((l*K::NR::to_usize()) as isize);
 
-		prefetch(b.offset(128) as *mut i8, 0, 0, 1);
-		prefetch(a.offset(128) as *mut i8, 0, 0, 1); // addr, read, nonlocal, data
+		prefetch(b.offset(128) as *mut i8, 0, 3, 1);
+		prefetch(a.offset(128) as *mut i8, 0, 3, 1); // addr, read, nonlocal, data
 
-		K::MR::full_unroll(|i|{
-			K::NR::full_unroll(|j|{
+		K::NR::full_unroll(|j|{
+			K::MR::full_unroll(|i|{
 				if K::FMA::to_usize() > 0 {
 					ab[j][i] = at::<K::T>(a, i).mul_add(at::<K::T>(b, j), ab[j][i]);
 				} else {
@@ -165,6 +151,7 @@ unsafe fn kernel_compute_trans<K: KernelConfig>(k: usize, alpha: K::T, a: *const
 				}
 			});
 		});
+		//unsafe{atomic_singlethreadfence()};
 	});
 
 	K::MR::full_unroll(|i|{
@@ -176,22 +163,23 @@ unsafe fn kernel_compute_trans<K: KernelConfig>(k: usize, alpha: K::T, a: *const
 	ab
 }
 
+
 /// prefetch locations of C which will be written too
 #[inline(always)]
 unsafe fn write_prefetch<K: KernelConfig>(c: *mut K::T, rsc: isize, csc: isize) {
 
 	if rsc == 1 {
 		K::NR::full_unroll(|j|{
-			prefetch(c.offset(csc * j as isize) as *mut i8, 1, 0, 1); // addr, write, nonlocal, data
+			prefetch(c.offset(csc * j as isize) as *mut i8, 1, 3, 1); // addr, write, nonlocal, data
 		});	
 	} else if csc == 1 {
 		K::MR::full_unroll(|i|{
-			prefetch(c.offset(rsc * i as isize) as *mut i8, 1, 0, 1); // addr, write, nonlocal, data
+			prefetch(c.offset(rsc * i as isize) as *mut i8, 1, 3, 1); // addr, write, nonlocal, data
 		});	
 	} else {
 		for i in 0..K::MR::to_usize() {
 			for j in 0..K::NR::to_usize() {
-				prefetch(c.offset(rsc * i as isize + csc * j as isize) as *mut i8, 1, 0, 1); // addr, write, nonlocal, data
+				prefetch(c.offset(rsc * i as isize + csc * j as isize) as *mut i8, 1, 3, 1); // addr, write, nonlocal, data
 			}
 		}
 	}
