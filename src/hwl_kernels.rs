@@ -10,14 +10,14 @@ type FD = unsafe fn(usize, usize, usize, f64, *const f64, isize, isize, *const f
 static THIN_SGEMMS: [&'static FS; 16] = [
 		&(gemm::gemm_loop::<SgemmCache, S32x1t> as FS), // 0
 		&(gemm::gemm_loop::<SgemmCache, S32x1t> as FS), // 1
-		&(gemm::gemm_loop::<SgemmCache, S24x2t> as FS), // 2
-		&(gemm::gemm_loop::<SgemmCache, S16x3t> as FS), // 3
+		&(gemm::gemm_loop::<SgemmCache, S32x2t> as FS), // 2
+		&(gemm::gemm_loop::<SgemmCache, S24x3t> as FS), // 3
 		&(gemm::gemm_loop::<SgemmCache, S16x4t> as FS), // 4
 		&(gemm::gemm_loop::<SgemmCache, S16x5t> as FS), // 5
-		&(gemm::gemm_loop::<SgemmCache, S16x3t> as FS), // 6
+		&(gemm::gemm_loop::<SgemmCache, S8x6t> as FS), // 6
 		&(gemm::gemm_loop::<SgemmCache, S8x7t> as FS), // 7
 		&(gemm::gemm_loop::<SgemmCache, S16x4t> as FS), // 8
-		&(gemm::gemm_loop::<SgemmCache, S16x3t> as FS), // 9
+		&(gemm::gemm_loop::<SgemmCache, S16x5t> as FS), // 9 (+1)
 		&(gemm::gemm_loop::<SgemmCache, S16x5t> as FS), // 10
 		&(gemm::gemm_loop::<SgemmCache, S16x4t> as FS), // 11 (+1)
 		&(gemm::gemm_loop::<SgemmCache, S16x4t> as FS), // 12
@@ -181,12 +181,12 @@ impl KernelConfig for S8x7t {
 }
 
 #[allow(unused)]
-pub struct S16x6t; // 12 avx registers
-impl KernelConfig for S16x6t {
+pub struct S8x6t; // 6 avx registers
+impl KernelConfig for S8x6t {
 	type T = f32;
-	type MR = U16;
+	type MR = U8;
 	type NR = U6;
-	type KU = U4;
+	type KU = U8;
 	type TR = U1;
 	type FMA = U1;
 }
@@ -211,20 +211,20 @@ impl KernelConfig for S16x4t {
 	type FMA = U1;
 }
 
-pub struct S16x3t; // 6 avx registers
-impl KernelConfig for S16x3t {
+pub struct S24x3t; // 9 avx registers
+impl KernelConfig for S24x3t {
 	type T = f32;
-	type MR = U16;
+	type MR = U24;
 	type NR = U3;
 	type KU = U8;
 	type TR = U1;
 	type FMA = U1;
 }
 
-pub struct S24x2t; // 6 avx registers
-impl KernelConfig for S24x2t {
+pub struct S32x2t; // 8 avx registers
+impl KernelConfig for S32x2t {
 	type T = f32;
-	type MR = U24;
+	type MR = U32;
 	type NR = U2;
 	type KU = U8;
 	type TR = U1;
