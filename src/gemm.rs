@@ -23,6 +23,7 @@ use rawpointer::PointerExt;
 use typenum::{Unsigned, U4, U8};
 use generic_params::*;
 use generic_kernel;
+use generic_array::ArrayLength;
 use typenum_loops::Loop;
 use num_traits::identities::{One, Zero};
 use {sse_stmxcsr, sse_ldmxcsr};
@@ -549,7 +550,7 @@ unsafe fn aligned_packing_vec<K: KernelConfig>(m: usize, k: usize, n: usize, cmc
 /// + rsa: row stride
 /// + csa: column stride
 /// + zero: zero element to pad with
-unsafe fn pack<T: Element, MR: Loop>(kc: usize,
+unsafe fn pack<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 				  mc: usize,
 				  mr: usize,
 				  pack: *mut T,
@@ -583,8 +584,8 @@ unsafe fn pack<T: Element, MR: Loop>(kc: usize,
 /// + rsa: row stride
 /// + csa: column stride
 /// + zero: zero element to pad with
-#[inline(never)]
-unsafe fn part_pack_row_major<T: Element, MR: Loop>(kc: usize,
+//#[inline(never)]
+unsafe fn part_pack_row_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 				  mc: usize,
 				  mr: usize,
 				  pack: *mut T,
@@ -603,13 +604,19 @@ unsafe fn part_pack_row_major<T: Element, MR: Loop>(kc: usize,
 		let a = a.offset((rsa * ir * mr) as isize);
 		let pack = pack.offset((ir * mr * kc) as isize);
 		for j in 0..kc{
+		//U4::partial_unroll(kc,|j|{
+			let mut arr = <GA<T, MR>>::default();
+
 			MR::full_unroll(|i|{
-				let pack = pack.offset((j*mr+i)as isize);
-				*pack = *a.offset((rsa * i + csa * j) as isize);
+				arr[i] = *a.offset((rsa * i + csa * j) as isize);
 			});
+
+			MR::full_unroll(|i|{
+				*(pack.offset((j*mr+i)as isize)) = arr[i];
+			});
+		//});
 		}
 	}
-
 }
 
 /// Pack matrix into `pack`
@@ -621,8 +628,8 @@ unsafe fn part_pack_row_major<T: Element, MR: Loop>(kc: usize,
 /// + rsa: row stride
 /// + csa: column stride
 /// + zero: zero element to pad with
-#[inline(never)]
-unsafe fn part_pack_col_major<T: Element, MR: Loop>(kc: usize,
+//#[inline(never)]
+unsafe fn part_pack_col_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 				  mc: usize,
 				  mr: usize,
 				  pack: *mut T,
@@ -639,14 +646,21 @@ unsafe fn part_pack_col_major<T: Element, MR: Loop>(kc: usize,
 	for ir in 0..mc / mr {
 		let a = a.offset((rsa * ir * mr) as isize);
 		let pack = pack.offset((ir * mr * kc) as isize);
+		
 		for j in 0..kc{
+		//U4::partial_unroll(kc,|j|{
+			let mut arr = <GA<T, MR>>::default();
+
 			MR::full_unroll(|i|{
-				let pack = pack.offset((j*mr+i)as isize);
-				*pack = *a.offset((rsa * i + csa * j) as isize);
+				arr[i] = *a.offset((rsa * i + csa * j) as isize);
 			});
+
+			MR::full_unroll(|i|{
+				*(pack.offset((j*mr+i)as isize)) = arr[i];
+			});
+		//});
 		}
 	}
-
 }
 
 /// Pack matrix into `pack`
@@ -658,8 +672,8 @@ unsafe fn part_pack_col_major<T: Element, MR: Loop>(kc: usize,
 /// + rsa: row stride
 /// + csa: column stride
 /// + zero: zero element to pad with
-#[inline(never)]
-unsafe fn part_pack_strided<T: Element, MR: Loop>(kc: usize,
+//#[inline(never)]
+unsafe fn part_pack_strided<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 				  mc: usize,
 				  mr: usize,
 				  pack: *mut T,
@@ -694,8 +708,8 @@ unsafe fn part_pack_strided<T: Element, MR: Loop>(kc: usize,
 /// + rsa: row stride
 /// + csa: column stride
 /// + zero: zero element to pad with
-#[inline(never)]
-unsafe fn part_pack_end<T: Element, MR: Loop>(kc: usize,
+//#[inline(never)]
+unsafe fn part_pack_end<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 				  mc: usize,
 				  mr: usize,
 				  pack: *mut T,
