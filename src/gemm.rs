@@ -175,7 +175,7 @@ pub unsafe fn dgemm(m: usize,
 /// * dont let `cmc*min(C:KC, k)` go above `C:MC*C:KC` still fit in cache
 /// returns (num_threads, cmc)
 #[cfg(no_multithreading)]
-fn get_num_threads_and_cmc<C: CacheConfig<K>, K: KernelConfig>(m: usize, k: usize, n: usize) -> (usize, usize){
+fn get_num_threads_and_cmc<C: CacheConfig<K>, K: KernelConfig>(_m: usize, _k: usize, _n: usize) -> (usize, usize){
 	(1, C::mc())
 }
 

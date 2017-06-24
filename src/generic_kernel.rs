@@ -10,6 +10,7 @@ use typenum::Unsigned;
 use typenum_loops::Loop;
 use generic_params::*;
 use std::cmp::min;
+use std::mem;
 use num_traits::Float;
 use super::prefetch;
 
@@ -102,7 +103,8 @@ unsafe fn kernel_compute<K: KernelConfig>(k: usize, alpha: K::T, a: *const K::T,
 		let a = a.offset((l*K::MR::to_usize()) as isize);
 		let b = b.offset((l*K::NR::to_usize()) as isize);
 
-		prefetch(a.offset(128) as *mut i8, 0, 3, 1);
+		if K::NR::to_usize()*mem::size_of::<K::T>() >= 32 {prefetch(b.offset(128) as *mut i8, 0, 3, 1);}
+		if K::MR::to_usize()*mem::size_of::<K::T>() >= 32 {prefetch(a.offset(128) as *mut i8, 0, 3, 1);}
 
 		K::MR::full_unroll(|i|{
 			K::NR::full_unroll(|j|{
@@ -138,8 +140,8 @@ unsafe fn kernel_compute_trans<K: KernelConfig>(k: usize, alpha: K::T, a: *const
 		let a = a.offset((l*K::MR::to_usize()) as isize);
 		let b = b.offset((l*K::NR::to_usize()) as isize);
 
-		prefetch(b.offset(128) as *mut i8, 0, 3, 1);
-		prefetch(a.offset(128) as *mut i8, 0, 3, 1); // addr, read, nonlocal, data
+		if K::NR::to_usize()*mem::size_of::<K::T>() >= 32 {prefetch(b.offset(128) as *mut i8, 0, 3, 1);}
+		if K::MR::to_usize()*mem::size_of::<K::T>() >= 32 {prefetch(a.offset(128) as *mut i8, 0, 3, 1);}
 
 		K::NR::full_unroll(|j|{
 			K::MR::full_unroll(|i|{
