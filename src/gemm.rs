@@ -20,7 +20,7 @@ use util::round_up_to;
 use util::round_up_div;
 
 use rawpointer::PointerExt;
-use typenum::{Unsigned, U4, U8};
+use typenum::Unsigned;
 use generic_params::*;
 use generic_kernel;
 use generic_array::ArrayLength;
@@ -29,31 +29,31 @@ use num_traits::identities::{One, Zero};
 use {sse_stmxcsr, sse_ldmxcsr};
 use snb_kernels;
 use hwl_kernels;
-use std::intrinsics::atomic_singlethreadfence;
+//use std::intrinsics::atomic_singlethreadfence;
 
 /// If 'ftz_daz' feature is not enabled this does nothing and returns 0.
 /// Sets the ftz and daz bits of the mxcsr register, zeroing input and result subnormal floats.
 /// Returns the current mxcsr register value, which should be restored at a later time by reset_ftz_and_daz();
 fn set_ftz_and_daz() -> i32 {
-	if cfg!(ftz_daz) {
+	//if cfg!(ftz_daz) {
 		let mut old_mxcsr = 0i32;
 		unsafe{sse_stmxcsr(&mut old_mxcsr as *mut i32 as *mut i8)};
 		let mut new_mxcsr = old_mxcsr | 0x8040;
 		unsafe{sse_ldmxcsr(&mut new_mxcsr as *mut i32 as *mut i8)};
-		unsafe{atomic_singlethreadfence()};// prevent this being moved backward after floating point operations
+		//unsafe{atomic_singlethreadfence()};// prevent this being moved backward after floating point operations
 		old_mxcsr
-	} else {
-		0
-	}
+	// } else {
+	// 	0
+	// }
 }
 
 /// If 'ftz_daz' feature is not enabled this does nothing.
 /// Set the mxcsr register back to its previous value
 fn reset_ftz_and_daz(mut old_mxcsr: i32){
-	if cfg!(ftz_daz) {
-		unsafe{atomic_singlethreadfence()};// prevent this being moved forward infront of floating point operations
+	//if cfg!(ftz_daz) {
+		//unsafe{atomic_singlethreadfence()};// prevent this being moved forward infront of floating point operations
 		unsafe{sse_ldmxcsr(&mut old_mxcsr as *mut i32 as *mut i8)};
-	}
+	//}
 }
 
 
@@ -165,6 +165,19 @@ pub unsafe fn dgemm(m: usize,
 	}
 }
 
+/// split M direction over multiple CPUS as long as the work units wont be too small.
+///
+/// First, maximise num_threads.
+/// Second, maximise cmc.
+/// while preserving 3 things:
+/// * dont let `cmc*min(C:KC, k)*min(C:NC, n)` go below `C:MC*C:KC*C:NC/C:MT` avoid excessive synchronisation costs
+/// * `cmc` must be divisible by `kmr`
+/// * dont let `cmc*min(C:KC, k)` go above `C:MC*C:KC` still fit in cache
+/// returns (num_threads, cmc)
+#[cfg(no_multithreading)]
+fn get_num_threads_and_cmc<C: CacheConfig<K>, K: KernelConfig>(m: usize, k: usize, n: usize) -> (usize, usize){
+	(1, C::mc())
+}
 
 /// split M direction over multiple CPUS as long as the work units wont be too small.
 ///
@@ -174,6 +187,8 @@ pub unsafe fn dgemm(m: usize,
 /// * dont let `cmc*min(C:KC, k)*min(C:NC, n)` go below `C:MC*C:KC*C:NC/C:MT` avoid excessive synchronisation costs
 /// * `cmc` must be divisible by `kmr`
 /// * dont let `cmc*min(C:KC, k)` go above `C:MC*C:KC` still fit in cache
+/// returns (num_threads, cmc)
+#[cfg(not(no_multithreading))]
 fn get_num_threads_and_cmc<C: CacheConfig<K>, K: KernelConfig>(m: usize, k: usize, n: usize) -> (usize, usize){
 
 	let m_bands = round_up_div(m, K::MR::to_usize());
@@ -249,7 +264,7 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 	let (num_threads, cmc) = get_num_threads_and_cmc::<C, K>(m, k, n);
 
 	assert_eq!(0, cnc % knr);
-
+	assert_eq!(0, cmc % kmr);
 	
 	let pool_opt = if num_threads > 1 {
 		THREAD_POOL.lock().ok()
@@ -257,8 +272,12 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 		None
 	};
 
-	let (_vec , app_stride, app_base, bpp) = aligned_packing_vec::<K>(m, k, n, cmc, ckc, cnc, C::alignment(), num_threads);
-	
+	// must be able to achieve alignment using only elementwise offsets
+	// size_of returns size + alignment padding.
+	assert!(C::alignment() % size_of::<K::T>() == 0); 
+	let (_vec , app_stride, app_base, bpp) = aligned_packing_vec::<K, C::A>(m, k, n, cmc, ckc, cnc, num_threads);
+	debug_assert_eq!(bpp as usize % align_of::<K::T>(), 0);
+
 	// LOOP 5: split n into nc parts
 	for (l5, nc) in range_chunk(n, cnc) {
 		dprint!("LOOP 5, {}, nc={}", l5, nc);
@@ -303,6 +322,7 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 						loop_counter: &mut loop_counter as *mut _,
 						sync: &mut sync as *mut _,
 					};
+					debug_assert_eq!(p.app as usize % align_of::<K::T>(), 0);
 
 					pool.execute(move || {
 						let bpp = p.bpp;
@@ -491,26 +511,27 @@ unsafe fn zero_block<T: Element>(rows: usize,
 /// but we can make them smaller if the matrix is smaller than this (just ensure
 /// we have rounded up to a multiple of the kernel size).
 ///
-/// Return packing vector, stride between of each app region, aligned pointer to start of first app, and aligned pointer to start of b
-unsafe fn aligned_packing_vec<K: KernelConfig>(m: usize, k: usize, n: usize, cmc: usize, ckc: usize, cnc: usize, align: usize, num_a: usize) -> (Vec<K::T>, isize, *mut K::T, *mut K::T){
+/// Returns an uninitialised packing vector, stride between of each app region, aligned pointer to start of first app, and aligned pointer to start of b
+unsafe fn aligned_packing_vec<K: KernelConfig, A: Unsigned>(m: usize, k: usize, n: usize, cmc: usize, ckc: usize, cnc: usize, num_a: usize) -> (Vec<K::T>, isize, *mut K::T, *mut K::T){
 	let m = min(m, cmc);
 	let k = min(k, ckc);
 	let n = min(n, cnc);
 
+	let align = A::to_usize();
 	// round up k, n to multiples of mr, nr
 	// round up to multiple of kc
 	
-	assert!(align % size_of::<K::T>() == 0);
-	assert!(align % align_of::<K::T>() == 0);
+	assert!(align % size_of::<K::T>() == 0); // size_of is size + alignment padding
+	//assert!(align % align_of::<K::T>() == 0);
 	
 	let align_elems = align / size_of::<K::T>();
 
 	let apack_size = k * round_up_to(m, K::MR::to_usize());
 	let bpack_size = k * round_up_to(n, K::NR::to_usize());
 
-	let align1 = align_elems; // give room to let first A~ be aligned
-	let align2 = if align_elems == 0 {0} else {round_up_to(apack_size, align_elems) - apack_size}; // room after each A~ to keep next section aligned
-	let nelem = align1 + (apack_size + align2) * num_a + bpack_size;
+	let padding_bytes1 = align_elems; // give room to let first A~ be aligned
+	let padding_bytes2 = if align_elems == 0 {0} else {round_up_to(apack_size, align_elems) - apack_size}; // room after each A~ to keep next section aligned
+	let nelem = padding_bytes1 + (apack_size + padding_bytes2) * num_a + bpack_size;
 	
 	let mut v = Vec::with_capacity(nelem);
 	v.set_len(nelem);
@@ -528,16 +549,16 @@ unsafe fn aligned_packing_vec<K: KernelConfig>(m: usize, k: usize, n: usize, cmc
 	
 	let mut a_ptr = v.as_mut_ptr();
 	if align != 0 {
-		let cur_align = a_ptr as usize % align;
-		debug_assert!(cur_align % size_of::<K::T>() == 0);
-		if cur_align != 0 {
-			a_ptr = a_ptr.offset(((align - cur_align) / size_of::<K::T>()) as isize);
+		let current_misalignment = a_ptr as usize % align;
+		debug_assert!(current_misalignment % size_of::<K::T>() == 0); // check that a whole number of elements are required to re-align the pointer
+		if current_misalignment != 0 {
+			a_ptr = a_ptr.offset(((align - current_misalignment) / size_of::<K::T>()) as isize);
 		}
 	}
 	
-	let b_ptr = a_ptr.offset(((apack_size + align2)*num_a) as isize);
+	let b_ptr = a_ptr.offset(((apack_size + padding_bytes2)*num_a) as isize);
 	
-	(v, (apack_size + align2) as isize, a_ptr, b_ptr)
+	(v, (apack_size + padding_bytes2) as isize, a_ptr, b_ptr)
 }
 
 
@@ -561,9 +582,6 @@ unsafe fn pack<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 	
 	debug_assert_eq!(mr, MR::to_usize());
 	
-
-
-
 	if csa == 1 {
 		part_pack_row_major::<T, MR>(kc, mc, mr, pack, a, rsa, csa);
 	} else if rsa == 1 {
@@ -572,12 +590,16 @@ unsafe fn pack<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 		part_pack_strided::<T, MR>(kc, mc, mr, pack, a, rsa, csa);
 	}
 
-	part_pack_end::<T, MR>(kc, mc, mr, pack, a, rsa, csa);
+	let rest = mc % mr;
+	if rest > 0 {
+		part_pack_end::<T, MR>(kc, mc, mr, pack, a, rsa, csa, rest);
+	}
 }
 
 /// Pack matrix into `pack`
+/// Only packs whole micro panels, and must only be called when csa == 1 (row_major format)
 /// Variable notation refers to packing ~A. for ~B mr = NR::to_usize
-///
+/// 
 /// + kc: length of the micropanel
 /// + mc: number of rows/columns in the matrix to be packed
 /// + mr: kernel rows/columns that we round up to
@@ -596,30 +618,28 @@ unsafe fn part_pack_row_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 	
 	debug_assert_eq!(mr, MR::to_usize());
 	debug_assert_eq!(csa, 1);
-	let csa = 1usize;
-	let rsa = rsa as usize;
+	let csa = 1isize;
 	let mr = MR::to_usize();
 
 	for ir in 0..mc / mr {
-		let a = a.offset((rsa * ir * mr) as isize);
+		let a = a.offset((ir * mr) as isize * rsa);
 		let pack = pack.offset((ir * mr * kc) as isize);
 		for j in 0..kc{
-		//U4::partial_unroll(kc,|j|{
 			let mut arr = <GA<T, MR>>::default();
 
 			MR::full_unroll(|i|{
-				arr[i] = *a.offset((rsa * i + csa * j) as isize);
+				arr[i] = *a.stride_offset(rsa, i).stride_offset(csa, j);
 			});
 
 			MR::full_unroll(|i|{
 				*(pack.offset((j*mr+i)as isize)) = arr[i];
 			});
-		//});
 		}
 	}
 }
 
 /// Pack matrix into `pack`
+/// Only packs whole micro panels, and must only be called when rsa == 1 (col_major format)
 /// Variable notation refers to packing ~A. for ~B mr = NR::to_usize
 ///
 /// + kc: length of the micropanel
@@ -627,7 +647,6 @@ unsafe fn part_pack_row_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 /// + mr: kernel rows/columns that we round up to
 /// + rsa: row stride
 /// + csa: column stride
-/// + zero: zero element to pad with
 //#[inline(never)]
 unsafe fn part_pack_col_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 				  mc: usize,
@@ -639,31 +658,29 @@ unsafe fn part_pack_col_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 {
 	debug_assert_eq!(mr, MR::to_usize());
 	debug_assert_eq!(rsa, 1);
-	let rsa = 1usize;
-	let csa = csa as usize;
+	let rsa = 1isize;
 	let mr = MR::to_usize();
 
 	for ir in 0..mc / mr {
-		let a = a.offset((rsa * ir * mr) as isize);
+		let a = a.offset((ir * mr) as isize * rsa);
 		let pack = pack.offset((ir * mr * kc) as isize);
 		
 		for j in 0..kc{
-		//U4::partial_unroll(kc,|j|{
 			let mut arr = <GA<T, MR>>::default();
 
 			MR::full_unroll(|i|{
-				arr[i] = *a.offset((rsa * i + csa * j) as isize);
+				arr[i] = *a.stride_offset(rsa, i).stride_offset(csa, j);
 			});
 
 			MR::full_unroll(|i|{
 				*(pack.offset((j*mr+i)as isize)) = arr[i];
 			});
-		//});
 		}
 	}
 }
 
 /// Pack matrix into `pack`
+/// Only packs whole micro panels, can handle any rsa or csa
 /// Variable notation refers to packing ~A. for ~B mr = NR::to_usize
 ///
 /// + kc: length of the micropanel
@@ -671,8 +688,7 @@ unsafe fn part_pack_col_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 /// + mr: kernel rows/columns that we round up to
 /// + rsa: row stride
 /// + csa: column stride
-/// + zero: zero element to pad with
-//#[inline(never)]
+#[cold]
 unsafe fn part_pack_strided<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 				  mc: usize,
 				  mr: usize,
@@ -684,22 +700,21 @@ unsafe fn part_pack_strided<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 	
 	debug_assert_eq!(mr, MR::to_usize());
 	let mr = MR::to_usize();
-	let csa = csa as usize;
-	let rsa = rsa as usize;
 
 	for ir in 0..mc / mr {
-		let a = a.offset((rsa * ir * mr) as isize);
+		let a = a.offset((ir * mr) as isize * rsa);
 		let pack = pack.offset((ir * mr * kc) as isize);
 		for j in 0..kc{
 			MR::full_unroll(|i|{
 				let pack = pack.offset((j*mr+i)as isize);
-				*pack = *a.offset((rsa * i + csa * j) as isize);
+				*pack = *a.stride_offset(rsa, i).stride_offset(csa, j);
 			});
 		}
 	}
 }
 
 /// Pack matrix into `pack`
+/// Only packs the last partial micro panel, can handle any rsa or csa
 /// Variable notation refers to packing ~A. for ~B mr = NR::to_usize
 ///
 /// + kc: length of the micropanel
@@ -707,36 +722,31 @@ unsafe fn part_pack_strided<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 /// + mr: kernel rows/columns that we round up to
 /// + rsa: row stride
 /// + csa: column stride
-/// + zero: zero element to pad with
-//#[inline(never)]
+#[cold]
 unsafe fn part_pack_end<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 				  mc: usize,
 				  mr: usize,
 				  pack: *mut T,
 				  a: *const T,
 				  rsa: isize,
-				  csa: isize)
+				  csa: isize,
+				  rest: usize)
 {
-	
 	debug_assert_eq!(mr, MR::to_usize());
 	let mr = MR::to_usize();
 
 	let mut pack = pack.offset(((mc/mr)*mr*kc) as isize);
 
 	// Pad with zeros to multiple of kernel size (uneven mc)
-	let rest = mc % mr;
-	if rest > 0 {
-		let row_offset = (mc / mr) * mr;
-		U8::partial_unroll(kc,|j|{
-			MR::full_unroll(|i|{
-				if i < rest {
-					*pack = *a.stride_offset(rsa, i + row_offset)
-							  .stride_offset(csa, j);
-				} else {
-					*pack = T::zero();
-				}
-				pack.inc();
-			});
+	let row_offset = mc - rest;//(mc / mr) * mr;
+	for j in 0..kc {
+		MR::full_unroll(|i|{
+			if i < rest {
+				*pack = *a.stride_offset(rsa, i + row_offset).stride_offset(csa, j);
+			} else {
+				*pack = T::zero();
+			}
+			pack.inc();
 		});
 	}
 }
