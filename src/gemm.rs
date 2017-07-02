@@ -29,6 +29,8 @@ use num_traits::identities::{One, Zero};
 use {sse_stmxcsr, sse_ldmxcsr};
 use snb_kernels;
 use hwl_kernels;
+use super::prefetch;
+
 //use std::intrinsics::atomic_singlethreadfence;
 
 /// If 'ftz_daz' feature is not enabled this does nothing and returns 0.
@@ -622,17 +624,29 @@ unsafe fn part_pack_row_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 	let mr = MR::to_usize();
 
 	for ir in 0..mc / mr {
+
 		let a = a.offset((ir * mr) as isize * rsa);
 		let pack = pack.offset((ir * mr * kc) as isize);
-		for j in 0..kc{
-			let mut arr = <GA<T, MR>>::default();
 
+		// prefetch the rows of a for the panel ahead of the current one,
+		// but only once we are a finite number of elements away from the next panel
+		let kc_prefetch = kc.saturating_sub(128/mr); // 64 and 128 seem to work well on sandybridge
+
+		for j in 0..kc_prefetch{
+			let a = a.stride_offset(csa, j);
 			MR::full_unroll(|i|{
-				arr[i] = *a.stride_offset(rsa, i).stride_offset(csa, j);
+				*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i);
 			});
+		}
 
+		MR::full_unroll(|i|{
+			prefetch(a.offset(((ir+1) * mr + i) as isize * rsa) as *mut i8, 0, 3, 1);
+		});
+
+		for j in kc_prefetch..kc{
+			let a = a.stride_offset(csa, j);
 			MR::full_unroll(|i|{
-				*(pack.offset((j*mr+i)as isize)) = arr[i];
+				*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i);
 			});
 		}
 	}
@@ -664,12 +678,15 @@ unsafe fn part_pack_col_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 	for ir in 0..mc / mr {
 		let a = a.offset((ir * mr) as isize * rsa);
 		let pack = pack.offset((ir * mr * kc) as isize);
-		
-		for j in 0..kc{
-			let mut arr = <GA<T, MR>>::default();
+		prefetch(a.offset(((ir+1) * mr) as isize * rsa) as *mut i8, 0, 3, 1);
 
+		for j in 0..kc{
+			prefetch(a.stride_offset(csa, j+64/mr) as *mut i8, 0, 3, 1);
+
+			let mut arr = <GA<T, MR>>::default();
+			let a = a.stride_offset(csa, j);
 			MR::full_unroll(|i|{
-				arr[i] = *a.stride_offset(rsa, i).stride_offset(csa, j);
+				arr[i] = *a.stride_offset(rsa, i);
 			});
 
 			MR::full_unroll(|i|{
@@ -706,8 +723,7 @@ unsafe fn part_pack_strided<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 		let pack = pack.offset((ir * mr * kc) as isize);
 		for j in 0..kc{
 			MR::full_unroll(|i|{
-				let pack = pack.offset((j*mr+i)as isize);
-				*pack = *a.stride_offset(rsa, i).stride_offset(csa, j);
+				*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i).stride_offset(csa, j);
 			});
 		}
 	}
