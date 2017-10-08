@@ -87,6 +87,7 @@
 
 use num_traits::float::Float;
 use std::cmp;
+use std::ops::AddAssign;
 use typenum::*;
 use typenum_loops::Loop;
 use generic_array::{GenericArray, ArrayLength};
@@ -162,8 +163,8 @@ pub trait CacheConfig<K: KernelConfig>: CacheConfigValues{
 
 impl<T: CacheConfigValues, K: KernelConfig> CacheConfig<K> for T{}
 
-pub trait Element: Copy + Send + Default + Float {}
-impl<T: Copy + Send + Default + Float> Element for T {}
+pub trait Element: Copy + Send + Default + Float + AddAssign {}
+impl<T: Copy + Send + Default + Float + AddAssign> Element for T {}
 
 pub struct SgemmCache;
 impl CacheConfigValues for SgemmCache{

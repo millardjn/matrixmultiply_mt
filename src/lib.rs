@@ -105,6 +105,7 @@ mod gemm;
 mod util;
 mod snb_kernels;
 mod hwl_kernels;
+mod loops;
 
 pub use gemm::sgemm;
 pub use gemm::dgemm;
