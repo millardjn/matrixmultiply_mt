@@ -308,15 +308,15 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 					bpp: *mut T,
 					a: *const T,
 					c: *mut T,
-					loop_counter: *mut AtomicUsize,
-					sync: *mut (Mutex<bool>, Condvar, AtomicUsize),
+					loop_counter: *const AtomicUsize,
+					sync: *const (Mutex<bool>, Condvar, AtomicUsize),
 				}
 				unsafe impl<T: Element> Send for Ptrs<T> {}
 
 				// Threads decrement the atomic int and move on to other work, last thread out flips the mutex/condvar
 				// This is likely a useless micro optimisation, but might be useful if the threadpool is large & shared & stressed and workloads are small?
-				let mut sync = (Mutex::new(false), Condvar::new(), AtomicUsize::new(num_threads));
-				let mut loop_counter = AtomicUsize::new(0);
+				let sync = (Mutex::new(false), Condvar::new(), AtomicUsize::new(num_threads));
+				let loop_counter = AtomicUsize::new(0);
 
 				for cpu_id in 0..num_threads {
 					let p = Ptrs::<K::T> {
@@ -324,8 +324,8 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 						bpp: bpp,
 						a: a,
 						c: c,
-						loop_counter: &mut loop_counter as *mut _,
-						sync: &mut sync as *mut _,
+						loop_counter: &loop_counter as *const _,
+						sync: &sync as *const _,
 					};
 					debug_assert_eq!(p.app as usize % align_of::<K::T>(), 0);
 
@@ -361,7 +361,9 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 						
 						let x = thread_counter.fetch_sub(1, Ordering::AcqRel);
 						if x == 1 {
-							*lock.lock().unwrap() = true;
+							{
+								*lock.lock().unwrap() = true;
+							}
 							cvar.notify_all();
 						}
 						reset_ftz_and_daz(mxcsr);
