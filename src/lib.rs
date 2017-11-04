@@ -92,6 +92,7 @@ extern crate num_traits;
 extern crate rawpointer;
 extern crate num_cpus;
 extern crate threadpool;
+extern crate parking_lot;
 
 #[macro_use] extern crate lazy_static;
 

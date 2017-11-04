@@ -10,7 +10,8 @@
 
 use threadpool::ThreadPool;
 use num_cpus;
-use std::sync::{Condvar, Mutex};
+//use std::sync::{Condvar, Mutex};
+use parking_lot::{Condvar, Mutex};
 use std::sync::atomic::{Ordering, AtomicUsize};
 use std::cmp::{min, max};
 use std::mem::size_of;
@@ -272,7 +273,8 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 	assert_eq!(0, cmc % kmr);
 	
 	let pool_opt = if num_threads > 1 {
-		THREAD_POOL.lock().ok()
+		//THREAD_POOL.lock().ok()
+		Some(THREAD_POOL.lock())
 	} else {
 		None
 	};
@@ -362,7 +364,8 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 						let x = thread_counter.fetch_sub(1, Ordering::AcqRel);
 						if x == 1 {
 							{
-								*lock.lock().unwrap() = true;
+								//*lock.lock().unwrap() = true;
+								*lock.lock() = true;
 							}
 							cvar.notify_all();
 						}
@@ -372,9 +375,11 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 				}
 
 				let (ref lock, ref cvar, ref thread_counter) = sync;
-				let mut finished = lock.lock().unwrap();
+				//let mut finished = lock.lock().unwrap();
+				let mut finished = lock.lock();
 				while !*finished {
-					finished = cvar.wait(finished).unwrap();
+					//finished = cvar.wait(finished).unwrap();
+					cvar.wait(&mut finished);
 				}
 				debug_assert!(thread_counter.load(Ordering::SeqCst) == 0);
 			} else {
