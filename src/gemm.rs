@@ -26,7 +26,7 @@ use generic_params::*;
 use generic_kernel;
 use generic_array::ArrayLength;
 use typenum_loops::Loop;
-use loops::full_unroll;
+//use loops::full_unroll;
 use num_traits::identities::{One, Zero};
 use {sse_stmxcsr, sse_ldmxcsr};
 use snb_kernels;
@@ -273,7 +273,6 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 	assert_eq!(0, cmc % kmr);
 	
 	let pool_opt = if num_threads > 1 {
-		//THREAD_POOL.lock().ok()
 		Some(THREAD_POOL.lock())
 	} else {
 		None
@@ -644,20 +643,26 @@ unsafe fn part_pack_row_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 
 		for j in 0..kc_prefetch{
 			let a = a.stride_offset(csa, j);
-			full_unroll(MR::to_usize(), &mut |i|{
+			MR::full_unroll(&mut |i|{
 				*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i);
 			});
+			// for i in 0..MR::to_usize() {
+			// 	*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i);
+			// }
 		}
 
-		full_unroll(MR::to_usize(), &mut |i|{
+		MR::full_unroll(&mut |i|{
 			prefetch(a.offset(((ir+1) * mr + i) as isize * rsa) as *mut i8, 0, 3, 1);
 		});
 
 		for j in kc_prefetch..kc{
 			let a = a.stride_offset(csa, j);
-			full_unroll(MR::to_usize(), &mut |i|{
+			MR::full_unroll(&mut |i|{
 				*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i);
 			});
+			// for i in 0..MR::to_usize() {
+			// 	*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i);
+			// }
 		}
 	}
 }
@@ -689,19 +694,25 @@ unsafe fn part_pack_col_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 		let a = a.offset((ir * mr) as isize * rsa);
 		let pack = pack.offset((ir * mr * kc) as isize);
 		prefetch(a.offset(((ir+1) * mr) as isize * rsa) as *mut i8, 0, 3, 1);
-
+		
 		for j in 0..kc{
 			prefetch(a.stride_offset(csa, j+64/mr) as *mut i8, 0, 3, 1);
 
 			let mut arr = <GA<T, MR>>::default();
 			let a = a.stride_offset(csa, j);
-			full_unroll(MR::to_usize(), &mut |i|{
+			MR::full_unroll(&mut |i|{
 				arr[i] = *a.stride_offset(rsa, i);
 			});
+			// for i in 0..MR::to_usize() {
+			// 	arr[i] = *a.stride_offset(rsa, i);
+			// }
 
-			full_unroll(MR::to_usize(), &mut |i|{
+			MR::full_unroll(&mut |i|{
 				*(pack.offset((j*mr+i)as isize)) = arr[i];
 			});
+			// for i in 0..MR::to_usize() {
+			// 	*(pack.offset((j*mr+i)as isize)) = arr[i];
+			// }
 		}
 	}
 }
@@ -732,9 +743,12 @@ unsafe fn part_pack_strided<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 		let a = a.offset((ir * mr) as isize * rsa);
 		let pack = pack.offset((ir * mr * kc) as isize);
 		for j in 0..kc{
-			full_unroll(MR::to_usize(), &mut |i|{
+			MR::full_unroll(&mut |i|{
 				*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i).stride_offset(csa, j);
 			});
+			// for i in 0..MR::to_usize() {
+			// 	*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i).stride_offset(csa, j);
+			// }
 		}
 	}
 }
@@ -766,7 +780,7 @@ unsafe fn part_pack_end<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 	// Pad with zeros to multiple of kernel size (uneven mc)
 	let row_offset = mc - rest;//(mc / mr) * mr;
 	for j in 0..kc {
-		full_unroll(MR::to_usize(), &mut |i|{
+		MR::full_unroll(&mut |i|{
 			if i < rest {
 				*pack = *a.stride_offset(rsa, i + row_offset).stride_offset(csa, j);
 			} else {

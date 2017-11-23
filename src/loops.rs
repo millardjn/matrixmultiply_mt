@@ -36,7 +36,7 @@ fn partial_unroll_recurse<F: FnMut(usize, usize)>(n: usize, i: usize, offset: us
 // 	f(i);
 // }
 
-
+#[allow(unused)]
 #[inline(always)]
 pub fn full_unroll<F: FnMut(usize)>(n: usize, f: &mut F) {
 	//full_unroll_recurse(n, 0, f);
