@@ -21,19 +21,17 @@ use util::round_up_to;
 use util::round_up_div;
 
 use rawpointer::PointerExt;
-use typenum::Unsigned;
+use typenum::{Unsigned};
 use generic_params::*;
 use generic_kernel;
 use generic_array::ArrayLength;
 use typenum_loops::Loop;
-//use loops::full_unroll;
 use num_traits::identities::{One, Zero};
 use {sse_stmxcsr, sse_ldmxcsr};
 use snb_kernels;
 use hwl_kernels;
 use super::prefetch;
 
-//use std::intrinsics::atomic_singlethreadfence;
 
 /// If 'ftz_daz' feature is not enabled this does nothing and returns 0.
 /// Sets the ftz and daz bits of the mxcsr register, zeroing input and result subnormal floats.
@@ -558,7 +556,7 @@ unsafe fn aligned_packing_vec<K: KernelConfig, A: Unsigned>(m: usize, k: usize, 
 			n);
 
 	
-	let mut a_ptr = v.as_mut_ptr();
+	let mut a_ptr: *mut K::T = v.as_mut_ptr();
 	if align != 0 {
 		let current_misalignment = a_ptr as usize % align;
 		debug_assert!(current_misalignment % size_of::<K::T>() == 0); // check that a whole number of elements are required to re-align the pointer
@@ -617,7 +615,7 @@ unsafe fn pack<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 /// + rsa: row stride
 /// + csa: column stride
 /// + zero: zero element to pad with
-//#[inline(never)]
+#[inline(never)]
 unsafe fn part_pack_row_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 				  mc: usize,
 				  mr: usize,
@@ -632,6 +630,7 @@ unsafe fn part_pack_row_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 	let csa = 1isize;
 	let mr = MR::to_usize();
 
+	//U4::partial_unroll(mc / mr, &mut |ir, _|{
 	for ir in 0..mc / mr {
 
 		let a = a.offset((ir * mr) as isize * rsa);
@@ -641,30 +640,50 @@ unsafe fn part_pack_row_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 		// but only once we are a finite number of elements away from the next panel
 		let kc_prefetch = kc.saturating_sub(128/mr); // 64 and 128 seem to work well on sandybridge
 
+		//U4::partial_unroll(kc_prefetch, &mut |j, _|{
 		for j in 0..kc_prefetch{
 			let a = a.stride_offset(csa, j);
-			MR::full_unroll(&mut |i|{
-				*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i);
-			});
+			// MR::full_unroll(&mut |i|{
+			// 	*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i);
+			// });
 			// for i in 0..MR::to_usize() {
 			// 	*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i);
 			// }
+
+			let mut arr = <GA<T, MR>>::default();
+			MR::full_unroll(&mut |i|{
+				arr[i] = *a.stride_offset(rsa, i);
+			});
+			MR::full_unroll(&mut |i|{
+				*(pack.offset((j*mr+i)as isize)) = arr[i];
+			});
 		}
+		//});
 
 		MR::full_unroll(&mut |i|{
 			prefetch(a.offset(((ir+1) * mr + i) as isize * rsa) as *mut i8, 0, 3, 1);
 		});
 
 		for j in kc_prefetch..kc{
+			
 			let a = a.stride_offset(csa, j);
-			MR::full_unroll(&mut |i|{
-				*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i);
-			});
+			// MR::full_unroll(&mut |i|{
+			// 	*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i);
+			// });
 			// for i in 0..MR::to_usize() {
 			// 	*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i);
 			// }
+
+			let mut arr = <GA<T, MR>>::default();
+			MR::full_unroll(&mut |i|{
+				arr[i] = *a.stride_offset(rsa, i);
+			});
+			MR::full_unroll(&mut |i|{
+				*(pack.offset((j*mr+i)as isize)) = arr[i];
+			});
 		}
 	}
+	//});
 }
 
 /// Pack matrix into `pack`
@@ -676,7 +695,7 @@ unsafe fn part_pack_row_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 /// + mr: kernel rows/columns that we round up to
 /// + rsa: row stride
 /// + csa: column stride
-//#[inline(never)]
+#[inline(never)]
 unsafe fn part_pack_col_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 				  mc: usize,
 				  mr: usize,
@@ -690,11 +709,13 @@ unsafe fn part_pack_col_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 	let rsa = 1isize;
 	let mr = MR::to_usize();
 
+	//U4::partial_unroll(mc / mr, &mut |ir, _|{
 	for ir in 0..mc / mr {
 		let a = a.offset((ir * mr) as isize * rsa);
 		let pack = pack.offset((ir * mr * kc) as isize);
 		prefetch(a.offset(((ir+1) * mr) as isize * rsa) as *mut i8, 0, 3, 1);
 		
+		//U4::partial_unroll(kc, &mut |j, _|{
 		for j in 0..kc{
 			prefetch(a.stride_offset(csa, j+64/mr) as *mut i8, 0, 3, 1);
 
@@ -714,7 +735,9 @@ unsafe fn part_pack_col_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 			// 	*(pack.offset((j*mr+i)as isize)) = arr[i];
 			// }
 		}
+		//});
 	}
+	//});
 }
 
 /// Pack matrix into `pack`
@@ -726,7 +749,7 @@ unsafe fn part_pack_col_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 /// + mr: kernel rows/columns that we round up to
 /// + rsa: row stride
 /// + csa: column stride
-#[cold]
+#[inline(never)]
 unsafe fn part_pack_strided<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 				  mc: usize,
 				  mr: usize,
@@ -744,7 +767,7 @@ unsafe fn part_pack_strided<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 		let pack = pack.offset((ir * mr * kc) as isize);
 		for j in 0..kc{
 			MR::full_unroll(&mut |i|{
-				*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i).stride_offset(csa, j);
+				*(pack.offset((j*mr+i) as isize)) = *a.stride_offset(rsa, i).stride_offset(csa, j);
 			});
 			// for i in 0..MR::to_usize() {
 			// 	*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i).stride_offset(csa, j);
@@ -762,7 +785,6 @@ unsafe fn part_pack_strided<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 /// + mr: kernel rows/columns that we round up to
 /// + rsa: row stride
 /// + csa: column stride
-#[cold]
 unsafe fn part_pack_end<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 				  mc: usize,
 				  mr: usize,

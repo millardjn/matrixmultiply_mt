@@ -68,7 +68,7 @@ pub unsafe fn masked_kernel<K: KernelConfig>(k: usize,
 /// + rsc: row stride of c
 /// + csc: col stride of c
 /// + if beta is 0, then c does not need to be initialized
-//#[inline(always)]
+#[inline(never)]
 pub unsafe fn kernel<K: KernelConfig>(k: usize,
 					alpha: K::T,
 					a: *const K::T,
@@ -110,20 +110,19 @@ unsafe fn kernel_compute<K: KernelConfig>(k: usize, alpha: K::T, a: *const K::T,
 				}
 			});
 		});
-
 	});
 
-	// K::MR::full_unroll(&mut |i|{
-	// 	K::NR::full_unroll(&mut |j|{
-	// 		ab[i][j] = ab[i][j]*alpha;
-	// 	});
-	// });
-
-	for i in 0..K::MR::to_usize() {
-		for j in 0..K::NR::to_usize() {
+	K::MR::full_unroll(&mut |i|{
+		K::NR::full_unroll(&mut |j|{
 			ab[i][j] = ab[i][j]*alpha;
-		}
-	}
+		});
+	});
+
+	// for i in 0..K::MR::to_usize() {
+	// 	for j in 0..K::NR::to_usize() {
+	// 		ab[i][j] = ab[i][j]*alpha;
+	// 	}
+	// }
 
 	ab
 }
@@ -152,17 +151,17 @@ unsafe fn kernel_compute_trans<K: KernelConfig>(k: usize, alpha: K::T, a: *const
 
 	});
 
-	// K::NR::full_unroll(&mut |j|{
-	// 	K::MR::full_unroll(&mut |i|{
-	// 		ab[j][i] = ab[j][i]*alpha;
-	// 	});
-	// });
-
-	for j in 0..K::NR::to_usize() {
-		for i in 0..K::MR::to_usize() {
+	K::NR::full_unroll(&mut |j|{
+		K::MR::full_unroll(&mut |i|{
 			ab[j][i] = ab[j][i]*alpha;
-		}
-	}
+		});
+	});
+
+	// for j in 0..K::NR::to_usize() {
+	// 	for i in 0..K::MR::to_usize() {
+	// 		ab[j][i] = ab[j][i]*alpha;
+	// 	}
+	// }
 
 	ab
 }

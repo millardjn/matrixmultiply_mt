@@ -102,11 +102,9 @@ extern crate parking_lot;
 mod generic_params;
 mod generic_kernel;
 mod gemm;
-//mod pointer;
 mod util;
 mod snb_kernels;
 mod hwl_kernels;
-mod loops;
 
 pub use gemm::sgemm;
 pub use gemm::dgemm;
