@@ -59,29 +59,29 @@ extern {
 	/// The cache type(d) specifies whether the prefetch is performed on the data (1) or instruction (0) cache.
 	/// The rw, locality and cache type arguments must be constant integers.
 	#[link_name = "llvm.prefetch"]
-	pub fn prefetch(a: *mut i8, b: i32, c: i32, d: i32) -> ();
+	fn prefetch(a: *mut i8, b: i32, c: i32, d: i32) -> ();
 }
 
 #[cfg(not(prefetch))]
-pub fn prefetch(_a: *mut i8, _b: i32, _c: i32, _d: i32) -> (){}
+fn prefetch(_a: *mut i8, _b: i32, _c: i32, _d: i32) -> (){}
 
 
 #[cfg(ftz_daz)]
 extern {
 	/// The `llvm.x86.sse.stmxcsr` intrinsic.
 	#[link_name = "llvm.x86.sse.stmxcsr"]
-	pub fn sse_stmxcsr(a: *mut i8) -> ();
+	fn sse_stmxcsr(a: *mut i8) -> ();
 	/// The `llvm.x86.sse.ldmxcsr` intrinsic.
 	#[link_name = "llvm.x86.sse.ldmxcsr"]
-	pub fn sse_ldmxcsr(a: *mut i8) -> ();
+	fn sse_ldmxcsr(a: *mut i8) -> ();
 }
 
 #[cfg(not(ftz_daz))]
 #[allow(unused_variables)]
-pub unsafe fn sse_stmxcsr(a: *mut i8) -> (){}
+unsafe fn sse_stmxcsr(a: *mut i8) -> (){}
 #[cfg(not(ftz_daz))]
 #[allow(unused_variables)]
-pub unsafe fn sse_ldmxcsr(a: *mut i8) -> (){}
+unsafe fn sse_ldmxcsr(a: *mut i8) -> (){}
 
 
 
@@ -93,6 +93,7 @@ extern crate rawpointer;
 extern crate num_cpus;
 extern crate threadpool;
 extern crate parking_lot;
+extern crate smallvec;
 
 #[macro_use] extern crate lazy_static;
 
@@ -108,3 +109,5 @@ mod hwl_kernels;
 
 pub use gemm::sgemm;
 pub use gemm::dgemm;
+pub use gemm::sgemm_st;
+pub use gemm::dgemm_st;

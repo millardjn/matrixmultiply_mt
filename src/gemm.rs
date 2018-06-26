@@ -20,6 +20,8 @@ use util::range_chunk;
 use util::round_up_to;
 use util::round_up_div;
 
+use smallvec::SmallVec;
+
 use rawpointer::PointerExt;
 use typenum::{Unsigned};
 use generic_params::*;
@@ -94,6 +96,44 @@ pub unsafe fn sgemm(m: usize,
 					c: *mut f32,
 					rsc: isize,
 					csc: isize) {
+
+	sgemm_flex(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, true)
+}
+
+/// Single threaded sgemm
+pub unsafe fn sgemm_st(m: usize,
+					k: usize,
+					n: usize,
+					alpha: f32,
+					a: *const f32,
+					rsa: isize,
+					csa: isize,
+					b: *const f32,
+					rsb: isize,
+					csb: isize,
+					beta: f32,
+					c: *mut f32,
+					rsc: isize,
+					csc: isize) {
+
+	sgemm_flex(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, false)
+}
+
+unsafe fn sgemm_flex(m: usize,
+					k: usize,
+					n: usize,
+					alpha: f32,
+					a: *const f32,
+					rsa: isize,
+					csa: isize,
+					b: *const f32,
+					rsb: isize,
+					csb: isize,
+					beta: f32,
+					c: *mut f32,
+					rsc: isize,
+					csc: isize,
+					multithread: bool) {
 	if k == 0 || m == 0 || n == 0 {
 		return;
 	}
@@ -104,16 +144,16 @@ pub unsafe fn sgemm(m: usize,
 		};
 
 	if cfg!(arch_haswell) {
-		hwl_kernels::sgemm(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		hwl_kernels::sgemm(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 	} else if cfg!(arch_sandybridge) {
-		snb_kernels::sgemm(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		snb_kernels::sgemm(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 	} else if cfg!(arch_penryn) {
 		//TODO
-		gemm_loop::<SgemmCache, S4x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		gemm_loop::<SgemmCache, S4x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 	} else if cfg!(arch_generic4x4fma) {
-		gemm_loop::<SgemmCache, S4x4fma>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		gemm_loop::<SgemmCache, S4x4fma>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 	} else {//arch_generic4x4
-		gemm_loop::<SgemmCache, S4x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		gemm_loop::<SgemmCache, S4x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 	}
 }
 
@@ -147,6 +187,44 @@ pub unsafe fn dgemm(m: usize,
 					c: *mut f64,
 					rsc: isize,
 					csc: isize) {
+
+	dgemm_flex(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, true)
+}
+
+/// Single threaded dgemm
+pub unsafe fn dgemm_st(m: usize,
+					k: usize,
+					n: usize,
+					alpha: f64,
+					a: *const f64,
+					rsa: isize,
+					csa: isize,
+					b: *const f64,
+					rsb: isize,
+					csb: isize,
+					beta: f64,
+					c: *mut f64,
+					rsc: isize,
+					csc: isize) {
+
+	dgemm_flex(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, false)
+}
+
+unsafe fn dgemm_flex(m: usize,
+					k: usize,
+					n: usize,
+					alpha: f64,
+					a: *const f64,
+					rsa: isize,
+					csa: isize,
+					b: *const f64,
+					rsb: isize,
+					csb: isize,
+					beta: f64,
+					c: *mut f64,
+					rsc: isize,
+					csc: isize,
+					multithread: bool) {
 	if k == 0 || m == 0 || n == 0 {return;
 	}
 	let (m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc) = if n > m {
@@ -156,16 +234,16 @@ pub unsafe fn dgemm(m: usize,
 		};
 
 	if cfg!(arch_haswell) {
-		hwl_kernels::dgemm(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
+		hwl_kernels::dgemm(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread)
 	} else if cfg!(arch_sandybridge) {
-		snb_kernels::dgemm(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
+		snb_kernels::dgemm(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread)
 	} else if cfg!(arch_penryn) {
 		// TODO
-		gemm_loop::<DgemmCache, D2x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		gemm_loop::<DgemmCache, D2x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 	} else if cfg!(arch_generic4x4fma) {
-		gemm_loop::<DgemmCache, D2x4fma>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		gemm_loop::<DgemmCache, D2x4fma>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 	} else {//arch_generic4x4
-		gemm_loop::<DgemmCache, D2x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		gemm_loop::<DgemmCache, D2x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 	}
 }
 
@@ -257,7 +335,8 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 					   beta: K::T,
 					   c: *mut K::T,
 					   rsc: isize,
-					   csc: isize)
+					   csc: isize,
+					   multithread: bool)
 {
 	
 	debug_assert!(m * n == 0 || (rsc != 0 && csc != 0));
@@ -270,7 +349,7 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 	assert_eq!(0, cnc % knr);
 	assert_eq!(0, cmc % kmr);
 	
-	let pool_opt = if num_threads > 1 {
+	let pool_opt = if num_threads > 1 && multithread {
 		Some(THREAD_POOL.lock())
 	} else {
 		None
@@ -521,7 +600,8 @@ unsafe fn zero_block<T: Element>(rows: usize,
 /// we have rounded up to a multiple of the kernel size).
 ///
 /// Returns an uninitialised packing vector, stride between of each app region, aligned pointer to start of first app, and aligned pointer to start of b
-unsafe fn aligned_packing_vec<K: KernelConfig, A: Unsigned>(m: usize, k: usize, n: usize, cmc: usize, ckc: usize, cnc: usize, num_a: usize) -> (Vec<K::T>, isize, *mut K::T, *mut K::T){
+#[inline(always)]
+unsafe fn aligned_packing_vec<K: KernelConfig, A: Unsigned>(m: usize, k: usize, n: usize, cmc: usize, ckc: usize, cnc: usize, num_a: usize) -> (SmallVec<[K::T; 128]>, isize, *mut K::T, *mut K::T){
 	let m = min(m, cmc);
 	let k = min(k, ckc);
 	let n = min(n, cnc);
@@ -542,7 +622,7 @@ unsafe fn aligned_packing_vec<K: KernelConfig, A: Unsigned>(m: usize, k: usize, 
 	let padding_bytes2 = if align_elems == 0 {0} else {round_up_to(apack_size, align_elems) - apack_size}; // room after each A~ to keep next section aligned
 	let nelem = padding_bytes1 + (apack_size + padding_bytes2) * num_a + bpack_size;
 	
-	let mut v = Vec::with_capacity(nelem);
+	let mut v = SmallVec::with_capacity(nelem);
 	v.set_len(nelem);
 	
 	

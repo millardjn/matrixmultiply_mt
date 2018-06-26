@@ -4,8 +4,8 @@ use gemm;
 use typenum::{U4, U2};
 
 
-type FS = unsafe fn(usize, usize, usize, f32, *const f32, isize, isize, *const f32, isize, isize, f32, *mut f32, isize, isize);
-type FD = unsafe fn(usize, usize, usize, f64, *const f64, isize, isize, *const f64, isize, isize, f64, *mut f64, isize, isize);
+type FS = unsafe fn(usize, usize, usize, f32, *const f32, isize, isize, *const f32, isize, isize, f32, *mut f32, isize, isize, bool);
+type FD = unsafe fn(usize, usize, usize, f64, *const f64, isize, isize, *const f64, isize, isize, f64, *mut f64, isize, isize, bool);
 
 static THIN_SGEMMS: [&'static FS; 16] = [
 		&(gemm::gemm_loop::<SgemmCache, S32x1t> as FS), // 0
@@ -39,17 +39,18 @@ pub unsafe fn sgemm(m: usize,
 					beta: f32,
 					c: *mut f32,
 					rsc: isize,
-					csc: isize) {
+					csc: isize,
+					multithread: bool) {
 
 	if n < THIN_SGEMMS.len() {
-		THIN_SGEMMS[n](m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		THIN_SGEMMS[n](m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 		return;
 	}
 
 	if n > 28 && csc == 1 {
-		gemm::gemm_loop::<SgemmCache, S4x16>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		gemm::gemm_loop::<SgemmCache, S4x16>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 	} else {
-		gemm::gemm_loop::<SgemmCache, S16x4t>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		gemm::gemm_loop::<SgemmCache, S16x4t>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 	}
 
 }
@@ -229,17 +230,18 @@ pub unsafe fn dgemm(m: usize,
 					beta: f64,
 					c: *mut f64,
 					rsc: isize,
-					csc: isize) {
+					csc: isize,
+					multithread: bool) {
 	
 	if n < THIN_SGEMMS.len() {
-		THIN_DGEMMS[n](m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		THIN_DGEMMS[n](m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 		return;
 	}
 
 	if n > 28 && csc == 1 {
-		gemm::gemm_loop::<DgemmCache, D4x8>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		gemm::gemm_loop::<DgemmCache, D4x8>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 	} else {
-		gemm::gemm_loop::<DgemmCache, D8x4t>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc);
+		gemm::gemm_loop::<DgemmCache, D8x4t>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 	}
 }
 

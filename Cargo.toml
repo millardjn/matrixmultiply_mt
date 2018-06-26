@@ -1,6 +1,6 @@
 [package]
 name = "matrixmultiply_mt"
-version = "0.1.5"
+version = "0.1.6"
 authors = ["bluss", "J. Millard"]
 
 license = "MIT/Apache-2.0"
@@ -25,3 +25,4 @@ typenum_loops = "0.3"
 generic-array = "0.8"
 num-traits = "0.1"
 parking_lot = "0.4"
+smallvec = "0.6"
