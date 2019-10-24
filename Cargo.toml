@@ -1,6 +1,6 @@
 [package]
 name = "matrixmultiply_mt"
-version = "0.1.6"
+version = "0.1.7"
 authors = ["bluss", "J. Millard"]
 
 license = "MIT/Apache-2.0"
@@ -16,13 +16,13 @@ keywords = ["matrix", "sgemm", "dgemm"]
 bench = false
 
 [dependencies]
-rawpointer = "0.1"
-num_cpus = "1.6"
-threadpool = "1.3"
-lazy_static = "0.2"
-typenum = "1.9"
+rawpointer = "0.2"
+num_cpus = "1.10"
+threadpool = "1.7"
+lazy_static = "1.4"
+typenum = "1.11"
 typenum_loops = "0.3"
-generic-array = "0.8"
-num-traits = "0.1"
-parking_lot = "0.4"
+generic-array = "0.13"
+num-traits = "0.2"
+parking_lot = "0.9"
 smallvec = "0.6"
