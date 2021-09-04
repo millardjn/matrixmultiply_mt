@@ -1,47 +1,80 @@
-use generic_params::*;
+use crate::gemm;
+use crate::generic_params::*;
 use typenum::*;
-use gemm;
-use typenum::{U4, U2};
+use typenum::{U2, U4};
 
+type FS = unsafe fn(
+	usize,
+	usize,
+	usize,
+	f32,
+	*const f32,
+	isize,
+	isize,
+	*const f32,
+	isize,
+	isize,
+	f32,
+	*mut f32,
+	isize,
+	isize,
+	bool,
+);
+type FD = unsafe fn(
+	usize,
+	usize,
+	usize,
+	f64,
+	*const f64,
+	isize,
+	isize,
+	*const f64,
+	isize,
+	isize,
+	f64,
+	*mut f64,
+	isize,
+	isize,
+	bool,
+);
 
-type FS = unsafe fn(usize, usize, usize, f32, *const f32, isize, isize, *const f32, isize, isize, f32, *mut f32, isize, isize, bool);
-type FD = unsafe fn(usize, usize, usize, f64, *const f64, isize, isize, *const f64, isize, isize, f64, *mut f64, isize, isize, bool);
+static THIN_SGEMMS: [&FS; 16] = [
+	&(gemm::gemm_loop::<SgemmCache, S32x1t> as FS), // 0
+	&(gemm::gemm_loop::<SgemmCache, S32x1t> as FS), // 1
+	&(gemm::gemm_loop::<SgemmCache, S32x2t> as FS), // 2
+	&(gemm::gemm_loop::<SgemmCache, S24x3t> as FS), // 3
+	&(gemm::gemm_loop::<SgemmCache, S16x4t> as FS), // 4
+	&(gemm::gemm_loop::<SgemmCache, S16x5t> as FS), // 5
+	&(gemm::gemm_loop::<SgemmCache, S8x6t> as FS),  // 6
+	&(gemm::gemm_loop::<SgemmCache, S8x7t> as FS),  // 7
+	&(gemm::gemm_loop::<SgemmCache, S16x4t> as FS), // 8
+	&(gemm::gemm_loop::<SgemmCache, S16x5t> as FS), // 9 (+1)
+	&(gemm::gemm_loop::<SgemmCache, S16x5t> as FS), // 10
+	&(gemm::gemm_loop::<SgemmCache, S16x4t> as FS), // 11 (+1)
+	&(gemm::gemm_loop::<SgemmCache, S16x4t> as FS), // 12
+	&(gemm::gemm_loop::<SgemmCache, S16x5t> as FS), // 13 (+2)
+	&(gemm::gemm_loop::<SgemmCache, S16x5t> as FS), // 14 (+1)
+	&(gemm::gemm_loop::<SgemmCache, S16x5t> as FS), // 15
+];
 
-static THIN_SGEMMS: [&'static FS; 16] = [
-		&(gemm::gemm_loop::<SgemmCache, S32x1t> as FS), // 0
-		&(gemm::gemm_loop::<SgemmCache, S32x1t> as FS), // 1
-		&(gemm::gemm_loop::<SgemmCache, S32x2t> as FS), // 2
-		&(gemm::gemm_loop::<SgemmCache, S24x3t> as FS), // 3
-		&(gemm::gemm_loop::<SgemmCache, S16x4t> as FS), // 4
-		&(gemm::gemm_loop::<SgemmCache, S16x5t> as FS), // 5
-		&(gemm::gemm_loop::<SgemmCache, S8x6t> as FS), // 6
-		&(gemm::gemm_loop::<SgemmCache, S8x7t> as FS), // 7
-		&(gemm::gemm_loop::<SgemmCache, S16x4t> as FS), // 8
-		&(gemm::gemm_loop::<SgemmCache, S16x5t> as FS), // 9 (+1)
-		&(gemm::gemm_loop::<SgemmCache, S16x5t> as FS), // 10
-		&(gemm::gemm_loop::<SgemmCache, S16x4t> as FS), // 11 (+1)
-		&(gemm::gemm_loop::<SgemmCache, S16x4t> as FS), // 12
-		&(gemm::gemm_loop::<SgemmCache, S16x5t> as FS), // 13 (+2)
-		&(gemm::gemm_loop::<SgemmCache, S16x5t> as FS), // 14 (+1)
-		&(gemm::gemm_loop::<SgemmCache, S16x5t> as FS), // 15
-	];
-
-pub unsafe fn sgemm(m: usize,
-					k: usize,
-					n: usize,
-					alpha: f32,
-					a: *const f32,
-					rsa: isize,
-					csa: isize,
-					b: *const f32,
-					rsb: isize,
-					csb: isize,
-					beta: f32,
-					c: *mut f32,
-					rsc: isize,
-					csc: isize,
-					multithread: bool) {
-
+#[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
+pub unsafe fn sgemm(
+	m: usize,
+	k: usize,
+	n: usize,
+	alpha: f32,
+	a: *const f32,
+	rsa: isize,
+	csa: isize,
+	b: *const f32,
+	rsb: isize,
+	csb: isize,
+	beta: f32,
+	c: *mut f32,
+	rsc: isize,
+	csc: isize,
+	multithread: bool,
+) {
 	if n < THIN_SGEMMS.len() {
 		THIN_SGEMMS[n](m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 		return;
@@ -52,7 +85,6 @@ pub unsafe fn sgemm(m: usize,
 	} else {
 		gemm::gemm_loop::<SgemmCache, S16x4t>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 	}
-
 }
 
 #[allow(unused)]
@@ -61,7 +93,7 @@ impl KernelConfig for S8x8 {
 	type T = f32;
 	type MR = U8;
 	type NR = U8;
-	type KU = U8;// 5
+	type KU = U8; // 5
 	type TR = U0;
 	type FMA = U1;
 }
@@ -72,7 +104,7 @@ impl KernelConfig for S8x8t {
 	type T = f32;
 	type MR = U8;
 	type NR = U8;
-	type KU = U8;// 5
+	type KU = U8; // 5
 	type TR = U1;
 	type FMA = U1;
 }
@@ -104,7 +136,7 @@ impl KernelConfig for S4x16 {
 	type T = f32;
 	type MR = U4;
 	type NR = U16;
-	type KU = U8;//5
+	type KU = U8; //5
 	type TR = U0;
 	type FMA = U1;
 }
@@ -115,7 +147,7 @@ impl KernelConfig for S8x7t {
 	type T = f32;
 	type MR = U8;
 	type NR = U7;
-	type KU = U8;//5
+	type KU = U8; //5
 	type TR = U1;
 	type FMA = U1;
 }
@@ -136,7 +168,7 @@ impl KernelConfig for S16x5t {
 	type T = f32;
 	type MR = U16;
 	type NR = U5;
-	type KU = U8;// 4
+	type KU = U8; // 4
 	type TR = U1;
 	type FMA = U1;
 }
@@ -146,7 +178,7 @@ impl KernelConfig for S16x4t {
 	type T = f32;
 	type MR = U16;
 	type NR = U4;
-	type KU = U8;//5
+	type KU = U8; //5
 	type TR = U1;
 	type FMA = U1;
 }
@@ -171,7 +203,7 @@ impl KernelConfig for S32x2t {
 	type FMA = U1;
 }
 
-pub struct S32x1t;// 4 avx registers
+pub struct S32x1t; // 4 avx registers
 impl KernelConfig for S32x1t {
 	type T = f32;
 	type MR = U32;
@@ -181,25 +213,24 @@ impl KernelConfig for S32x1t {
 	type FMA = U1;
 }
 
-
-static THIN_DGEMMS: [&'static FD; 16] = [
-		&(gemm::gemm_loop::<DgemmCache, D16x1t> as FD), // 0
-		&(gemm::gemm_loop::<DgemmCache, D16x1t> as FD), // 1
-		&(gemm::gemm_loop::<DgemmCache, D16x2t> as FD), // 2
-		&(gemm::gemm_loop::<DgemmCache, D12x3t> as FD), // 3
-		&(gemm::gemm_loop::<DgemmCache, D8x4t> as FD), // 4
-		&(gemm::gemm_loop::<DgemmCache, D8x5t> as FD), // 5
-		&(gemm::gemm_loop::<DgemmCache, D4x6t> as FD), // 6
-		&(gemm::gemm_loop::<DgemmCache, D4x7t> as FD), // 7
-		&(gemm::gemm_loop::<DgemmCache, D8x4t> as FD), // 8
-		&(gemm::gemm_loop::<DgemmCache, D8x5t> as FD), // 9 (+1)
-		&(gemm::gemm_loop::<DgemmCache, D8x5t> as FD), // 10
-		&(gemm::gemm_loop::<DgemmCache, D8x4t> as FD), // 11 (+1)
-		&(gemm::gemm_loop::<DgemmCache, D8x4t> as FD), // 12
-		&(gemm::gemm_loop::<DgemmCache, D8x5t> as FD), // 13 (+2)
-		&(gemm::gemm_loop::<DgemmCache, D8x5t> as FD), // 14 (+1)
-		&(gemm::gemm_loop::<DgemmCache, D8x5t> as FD), // 15
-	];
+static THIN_DGEMMS: [&FD; 16] = [
+	&(gemm::gemm_loop::<DgemmCache, D16x1t> as FD), // 0
+	&(gemm::gemm_loop::<DgemmCache, D16x1t> as FD), // 1
+	&(gemm::gemm_loop::<DgemmCache, D16x2t> as FD), // 2
+	&(gemm::gemm_loop::<DgemmCache, D12x3t> as FD), // 3
+	&(gemm::gemm_loop::<DgemmCache, D8x4t> as FD),  // 4
+	&(gemm::gemm_loop::<DgemmCache, D8x5t> as FD),  // 5
+	&(gemm::gemm_loop::<DgemmCache, D4x6t> as FD),  // 6
+	&(gemm::gemm_loop::<DgemmCache, D4x7t> as FD),  // 7
+	&(gemm::gemm_loop::<DgemmCache, D8x4t> as FD),  // 8
+	&(gemm::gemm_loop::<DgemmCache, D8x5t> as FD),  // 9 (+1)
+	&(gemm::gemm_loop::<DgemmCache, D8x5t> as FD),  // 10
+	&(gemm::gemm_loop::<DgemmCache, D8x4t> as FD),  // 11 (+1)
+	&(gemm::gemm_loop::<DgemmCache, D8x4t> as FD),  // 12
+	&(gemm::gemm_loop::<DgemmCache, D8x5t> as FD),  // 13 (+2)
+	&(gemm::gemm_loop::<DgemmCache, D8x5t> as FD),  // 14 (+1)
+	&(gemm::gemm_loop::<DgemmCache, D8x5t> as FD),  // 15
+];
 
 /// General matrix multiplication (f64)
 ///
@@ -217,22 +248,24 @@ static THIN_DGEMMS: [&'static FD; 16] = [
 /// elements that alias each other, for example they can not be zero.
 ///
 /// If β is zero, then C does not need to be initialized.
-pub unsafe fn dgemm(m: usize,
-					k: usize,
-					n: usize,
-					alpha: f64,
-					a: *const f64,
-					rsa: isize,
-					csa: isize,
-					b: *const f64,
-					rsb: isize,
-					csb: isize,
-					beta: f64,
-					c: *mut f64,
-					rsc: isize,
-					csc: isize,
-					multithread: bool) {
-	
+#[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
+pub unsafe fn dgemm(
+	m: usize,
+	k: usize,
+	n: usize,
+	alpha: f64,
+	a: *const f64,
+	rsa: isize,
+	csa: isize,
+	b: *const f64,
+	rsb: isize,
+	csb: isize,
+	beta: f64,
+	c: *mut f64,
+	rsc: isize,
+	csc: isize,
+	multithread: bool,
+) {
 	if n < THIN_SGEMMS.len() {
 		THIN_DGEMMS[n](m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 		return;
@@ -251,7 +284,7 @@ impl KernelConfig for D8x4 {
 	type T = f64;
 	type MR = U8;
 	type NR = U4;
-	type KU = U8;// 5
+	type KU = U8; // 5
 	type TR = U0;
 	type FMA = U1;
 }
@@ -262,7 +295,7 @@ impl KernelConfig for D4x8t {
 	type T = f64;
 	type MR = U4;
 	type NR = U8;
-	type KU = U8;// 5
+	type KU = U8; // 5
 	type TR = U1;
 	type FMA = U1;
 }
@@ -294,7 +327,7 @@ impl KernelConfig for D4x8 {
 	type T = f64;
 	type MR = U4;
 	type NR = U8;
-	type KU = U8;//5
+	type KU = U8; //5
 	type TR = U0;
 	type FMA = U1;
 }
@@ -361,7 +394,7 @@ impl KernelConfig for D16x2t {
 	type FMA = U1;
 }
 
-pub struct D16x1t;// 4 avx registers
+pub struct D16x1t; // 4 avx registers
 impl KernelConfig for D16x1t {
 	type T = f64;
 	type MR = U16;
@@ -371,10 +404,8 @@ impl KernelConfig for D16x1t {
 	type FMA = U1;
 }
 
-
-
 pub struct SgemmCache;
-impl CacheConfigValues for SgemmCache{
+impl CacheConfigValues for SgemmCache {
 	type A = U32;
 	type MT = U128;
 	type MC = U64;
@@ -383,7 +414,7 @@ impl CacheConfigValues for SgemmCache{
 }
 
 pub struct DgemmCache;
-impl CacheConfigValues for DgemmCache{
+impl CacheConfigValues for DgemmCache {
 	type A = U32;
 	type MT = U128;
 	type MC = U32;

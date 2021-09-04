@@ -7,59 +7,27 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-
-use threadpool::ThreadPool;
-use num_cpus;
-//use std::sync::{Condvar, Mutex};
-use parking_lot::{Condvar, Mutex};
-use std::sync::atomic::{Ordering, AtomicUsize};
-use std::cmp::{min, max};
-use std::mem::size_of;
-use std::mem::align_of;
-use util::range_chunk;
-use util::round_up_to;
-use util::round_up_div;
-
-use smallvec::SmallVec;
-
-use rawpointer::PointerExt;
-use typenum::{Unsigned};
-use generic_params::*;
-use generic_kernel;
 use generic_array::ArrayLength;
-use typenum_loops::Loop;
 use num_traits::identities::{One, Zero};
-use {sse_stmxcsr, sse_ldmxcsr};
-use snb_kernels;
-use hwl_kernels;
-use super::prefetch;
+use parking_lot::{Condvar, Mutex};
+use rawpointer::PointerExt;
+use smallvec::SmallVec;
+use std::cmp::{max, min};
+use std::mem::align_of;
+use std::mem::size_of;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use threadpool::ThreadPool;
+use typenum::Unsigned;
+use typenum_loops::Loop;
 
-
-/// If 'ftz_daz' feature is not enabled this does nothing and returns 0.
-/// Sets the ftz and daz bits of the mxcsr register, zeroing input and result subnormal floats.
-/// Returns the current mxcsr register value, which should be restored at a later time by reset_ftz_and_daz();
-fn set_ftz_and_daz() -> i32 {
-	//if cfg!(ftz_daz) {
-		let mut old_mxcsr = 0i32;
-		unsafe{sse_stmxcsr(&mut old_mxcsr as *mut i32 as *mut i8)};
-		let mut new_mxcsr = old_mxcsr | 0x8040;
-		unsafe{sse_ldmxcsr(&mut new_mxcsr as *mut i32 as *mut i8)};
-		//unsafe{atomic_singlethreadfence()};// prevent this being moved backward after floating point operations
-		old_mxcsr
-	// } else {
-	// 	0
-	// }
-}
-
-/// If 'ftz_daz' feature is not enabled this does nothing.
-/// Set the mxcsr register back to its previous value
-fn reset_ftz_and_daz(mut old_mxcsr: i32){
-	//if cfg!(ftz_daz) {
-		//unsafe{atomic_singlethreadfence()};// prevent this being moved forward infront of floating point operations
-		unsafe{sse_ldmxcsr(&mut old_mxcsr as *mut i32 as *mut i8)};
-	//}
-}
-
+use crate::generic_kernel;
+use crate::generic_params::SgemmCache;
+use crate::generic_params::*;
+use crate::hwl_kernels;
+use crate::util::range_chunk;
+use crate::util::round_up_div;
+use crate::util::round_up_to;
+use crate::{prefetch_read, reset_ftz_and_daz, set_ftz_and_daz, snb_kernels};
 
 lazy_static! {
 	static ref NUM_CPUS: usize = num_cpus::get();
@@ -82,66 +50,73 @@ lazy_static! {
 /// elements that alias each other, for example they can not be zero.
 ///
 /// If β is zero, then C does not need to be initialized.
-pub unsafe fn sgemm(m: usize,
-					k: usize,
-					n: usize,
-					alpha: f32,
-					a: *const f32,
-					rsa: isize,
-					csa: isize,
-					b: *const f32,
-					rsb: isize,
-					csb: isize,
-					beta: f32,
-					c: *mut f32,
-					rsc: isize,
-					csc: isize) {
-
+#[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
+pub unsafe fn sgemm(
+	m: usize,
+	k: usize,
+	n: usize,
+	alpha: f32,
+	a: *const f32,
+	rsa: isize,
+	csa: isize,
+	b: *const f32,
+	rsb: isize,
+	csb: isize,
+	beta: f32,
+	c: *mut f32,
+	rsc: isize,
+	csc: isize,
+) {
 	sgemm_flex(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, true)
 }
 
 /// Single threaded sgemm
-pub unsafe fn sgemm_st(m: usize,
-					k: usize,
-					n: usize,
-					alpha: f32,
-					a: *const f32,
-					rsa: isize,
-					csa: isize,
-					b: *const f32,
-					rsb: isize,
-					csb: isize,
-					beta: f32,
-					c: *mut f32,
-					rsc: isize,
-					csc: isize) {
-
+#[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
+pub unsafe fn sgemm_st(
+	m: usize,
+	k: usize,
+	n: usize,
+	alpha: f32,
+	a: *const f32,
+	rsa: isize,
+	csa: isize,
+	b: *const f32,
+	rsb: isize,
+	csb: isize,
+	beta: f32,
+	c: *mut f32,
+	rsc: isize,
+	csc: isize,
+) {
 	sgemm_flex(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, false)
 }
 
-unsafe fn sgemm_flex(m: usize,
-					k: usize,
-					n: usize,
-					alpha: f32,
-					a: *const f32,
-					rsa: isize,
-					csa: isize,
-					b: *const f32,
-					rsb: isize,
-					csb: isize,
-					beta: f32,
-					c: *mut f32,
-					rsc: isize,
-					csc: isize,
-					multithread: bool) {
+#[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
+unsafe fn sgemm_flex(
+	m: usize,
+	k: usize,
+	n: usize,
+	alpha: f32,
+	a: *const f32,
+	rsa: isize,
+	csa: isize,
+	b: *const f32,
+	rsb: isize,
+	csb: isize,
+	beta: f32,
+	c: *mut f32,
+	rsc: isize,
+	csc: isize,
+	multithread: bool,
+) {
 	if k == 0 || m == 0 || n == 0 {
 		return;
 	}
 	let (m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc) = if n > m {
-			(n, k, m, b, csb, rsb, a, csa, rsa, c, csc, rsc)
-		} else {
-			(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc)
-		};
+		(n, k, m, b, csb, rsb, a, csa, rsa, c, csc, rsc)
+	} else {
+		(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc)
+	};
 
 	if cfg!(arch_haswell) {
 		hwl_kernels::sgemm(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
@@ -152,7 +127,8 @@ unsafe fn sgemm_flex(m: usize,
 		gemm_loop::<SgemmCache, S4x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 	} else if cfg!(arch_generic4x4fma) {
 		gemm_loop::<SgemmCache, S4x4fma>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
-	} else {//arch_generic4x4
+	} else {
+		//arch_generic4x4
 		gemm_loop::<SgemmCache, S4x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 	}
 }
@@ -173,65 +149,73 @@ unsafe fn sgemm_flex(m: usize,
 /// elements that alias each other, for example they can not be zero.
 ///
 /// If β is zero, then C does not need to be initialized.
-pub unsafe fn dgemm(m: usize,
-					k: usize,
-					n: usize,
-					alpha: f64,
-					a: *const f64,
-					rsa: isize,
-					csa: isize,
-					b: *const f64,
-					rsb: isize,
-					csb: isize,
-					beta: f64,
-					c: *mut f64,
-					rsc: isize,
-					csc: isize) {
-
+#[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
+pub unsafe fn dgemm(
+	m: usize,
+	k: usize,
+	n: usize,
+	alpha: f64,
+	a: *const f64,
+	rsa: isize,
+	csa: isize,
+	b: *const f64,
+	rsb: isize,
+	csb: isize,
+	beta: f64,
+	c: *mut f64,
+	rsc: isize,
+	csc: isize,
+) {
 	dgemm_flex(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, true)
 }
 
 /// Single threaded dgemm
-pub unsafe fn dgemm_st(m: usize,
-					k: usize,
-					n: usize,
-					alpha: f64,
-					a: *const f64,
-					rsa: isize,
-					csa: isize,
-					b: *const f64,
-					rsb: isize,
-					csb: isize,
-					beta: f64,
-					c: *mut f64,
-					rsc: isize,
-					csc: isize) {
-
+#[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
+pub unsafe fn dgemm_st(
+	m: usize,
+	k: usize,
+	n: usize,
+	alpha: f64,
+	a: *const f64,
+	rsa: isize,
+	csa: isize,
+	b: *const f64,
+	rsb: isize,
+	csb: isize,
+	beta: f64,
+	c: *mut f64,
+	rsc: isize,
+	csc: isize,
+) {
 	dgemm_flex(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, false)
 }
 
-unsafe fn dgemm_flex(m: usize,
-					k: usize,
-					n: usize,
-					alpha: f64,
-					a: *const f64,
-					rsa: isize,
-					csa: isize,
-					b: *const f64,
-					rsb: isize,
-					csb: isize,
-					beta: f64,
-					c: *mut f64,
-					rsc: isize,
-					csc: isize,
-					multithread: bool) {
-	if k == 0 || m == 0 || n == 0 {return;
+#[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
+unsafe fn dgemm_flex(
+	m: usize,
+	k: usize,
+	n: usize,
+	alpha: f64,
+	a: *const f64,
+	rsa: isize,
+	csa: isize,
+	b: *const f64,
+	rsb: isize,
+	csb: isize,
+	beta: f64,
+	c: *mut f64,
+	rsc: isize,
+	csc: isize,
+	multithread: bool,
+) {
+	if k == 0 || m == 0 || n == 0 {
+		return;
 	}
 	let (m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc) = if n > m {
-			(n, k, m, b, csb, rsb, a, csa, rsa, c, csc, rsc)
-		} else {
-			(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc)
-		};
+		(n, k, m, b, csb, rsb, a, csa, rsa, c, csc, rsc)
+	} else {
+		(m, k, n, a, rsa, csa, b, rsb, csb, c, rsc, csc)
+	};
 
 	if cfg!(arch_haswell) {
 		hwl_kernels::dgemm(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread)
@@ -242,7 +226,8 @@ unsafe fn dgemm_flex(m: usize,
 		gemm_loop::<DgemmCache, D2x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 	} else if cfg!(arch_generic4x4fma) {
 		gemm_loop::<DgemmCache, D2x4fma>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
-	} else {//arch_generic4x4
+	} else {
+		//arch_generic4x4
 		gemm_loop::<DgemmCache, D2x4>(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc, multithread);
 	}
 }
@@ -257,7 +242,7 @@ unsafe fn dgemm_flex(m: usize,
 /// * dont let `cmc*min(C:KC, k)` go above `C:MC*C:KC` still fit in cache
 /// returns (num_threads, cmc)
 #[cfg(no_multithreading)]
-fn get_num_threads_and_cmc<C: CacheConfig<K>, K: KernelConfig>(_m: usize, _k: usize, _n: usize) -> (usize, usize){
+fn get_num_threads_and_cmc<C: CacheConfig<K>, K: KernelConfig>(_m: usize, _k: usize, _n: usize) -> (usize, usize) {
 	(1, C::mc())
 }
 
@@ -271,21 +256,20 @@ fn get_num_threads_and_cmc<C: CacheConfig<K>, K: KernelConfig>(_m: usize, _k: us
 /// * dont let `cmc*min(C:KC, k)` go above `C:MC*C:KC` still fit in cache
 /// returns (num_threads, cmc)
 #[cfg(not(no_multithreading))]
-fn get_num_threads_and_cmc<C: CacheConfig<K>, K: KernelConfig>(m: usize, k: usize, n: usize) -> (usize, usize){
-
+fn get_num_threads_and_cmc<C: CacheConfig<K>, K: KernelConfig>(m: usize, k: usize, n: usize) -> (usize, usize) {
 	let m_bands = round_up_div(m, K::MR::to_usize());
 
 	// maximum bound mc is that the ~A block must be less than the maximum size
 	let max_mc_bands = {
 		let max_size = C::kc() * C::mc();
 		let max_kc = max(min(k, C::kc()), 1);
-		(max_size / max_kc + C::mc())/(K::MR::to_usize()*2)
+		(max_size / max_kc + C::mc()) / (K::MR::to_usize() * 2)
 	};
 
 	// minimum bound on mc before splitting over threads is some fraction of the max compute per ~A cache block
 	let min_split_mc_bands = min(max_mc_bands, {
 		let max_compute = C::mc() * C::kc() * C::nc();
-		let min_compute = max(max_compute/C::multithread_factor(), 1);
+		let min_compute = max(max_compute / C::multithread_factor(), 1);
 
 		let max_kc = max(min(k, C::kc()), 1);
 		let max_nc = max(min(round_up_to(n, K::NR::to_usize()), C::nc()), 1);
@@ -293,26 +277,29 @@ fn get_num_threads_and_cmc<C: CacheConfig<K>, K: KernelConfig>(m: usize, k: usiz
 		round_up_div(round_up_div(min_compute, max_nc * max_kc), K::MR::to_usize())
 	});
 
-
 	let num_threads = {
-		let full_blocks = m_bands/min_split_mc_bands;
+		let full_blocks = m_bands / min_split_mc_bands;
 		max(min(*NUM_CPUS, full_blocks), 1)
 	};
-
 
 	let mc = {
 		let m_bands_per_thread = max(round_up_div(m_bands, num_threads), 1);
 		let blocks_per_thread = round_up_div(m_bands_per_thread, max_mc_bands);
 		let mc_bands = min(round_up_div(m_bands_per_thread, blocks_per_thread), m_bands);
-		let mc = mc_bands * K::MR::to_usize();
 
 		// normally both of these would be true. however when dealing with low compute high memory operations, the mc direction may be split over multiple cpus when the cache limit is exceeded, even when mc will be less than minimum splitting size for compute
 		//debug_assert!(num_threads == 1 || mc >= min_split_mc_bands* K::MR::to_usize(), "threads{} mc{} min{} max{} bpt{} mbpt{}", num_threads, mc, min_split_mc_bands, max_mc_bands, blocks_per_thread, m_bands_per_thread);
 		//debug_assert!(num_threads == 1 || mc*max(min(k, C::KC::to_usize()), 1)*max(min(round_up_to(n, K::NR::to_usize()), C::NC::to_usize()), 1) >= C::MC::to_usize() * C::KC::to_usize() * C::NC::to_usize()/C::MT::to_usize());
-		mc
+		mc_bands * K::MR::to_usize()
 	};
 
-	debug_assert!(mc <= max_mc_bands* K::MR::to_usize(), "mc{} min{} max{}", mc, min_split_mc_bands, max_mc_bands);
+	debug_assert!(
+		mc <= max_mc_bands * K::MR::to_usize(),
+		"mc{} min{} max{}",
+		mc,
+		min_split_mc_bands,
+		max_mc_bands
+	);
 	debug_assert!(num_threads <= *NUM_CPUS);
 	debug_assert_eq!(0, mc % K::MR::to_usize());
 
@@ -322,23 +309,24 @@ fn get_num_threads_and_cmc<C: CacheConfig<K>, K: KernelConfig>(m: usize, k: usiz
 /// Implement matrix multiply using packed buffers and a microkernel strategy
 /// The type parameter `K` is the gemm microkernel configuration.
 /// The type parameter `C` is the outer gemm cache blocking configuration.
-pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
-					   k: usize,
-					   n: usize,
-					   alpha: K::T,
-					   a: *const K::T,
-					   rsa: isize,
-					   csa: isize,
-					   b: *const K::T,
-					   rsb: isize,
-					   csb: isize,
-					   beta: K::T,
-					   c: *mut K::T,
-					   rsc: isize,
-					   csc: isize,
-					   multithread: bool)
-{
-	
+#[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
+pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(
+	m: usize,
+	k: usize,
+	n: usize,
+	alpha: K::T,
+	a: *const K::T,
+	rsa: isize,
+	csa: isize,
+	b: *const K::T,
+	rsb: isize,
+	csb: isize,
+	beta: K::T,
+	c: *mut K::T,
+	rsc: isize,
+	csc: isize,
+	multithread: bool,
+) {
 	debug_assert!(m * n == 0 || (rsc != 0 && csc != 0));
 	let knr = K::NR::to_usize();
 	let kmr = K::MR::to_usize();
@@ -348,7 +336,7 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 
 	assert_eq!(0, cnc % knr);
 	assert_eq!(0, cmc % kmr);
-	
+
 	let pool_opt = if num_threads > 1 && multithread {
 		Some(THREAD_POOL.lock())
 	} else {
@@ -357,8 +345,8 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 
 	// must be able to achieve alignment using only elementwise offsets
 	// size_of returns size + alignment padding.
-	assert!(C::alignment() % size_of::<K::T>() == 0); 
-	let (_vec , app_stride, app_base, bpp) = aligned_packing_vec::<K, C::A>(m, k, n, cmc, ckc, cnc, num_threads);
+	assert!(C::alignment() % size_of::<K::T>() == 0);
+	let (_vec, app_stride, app_base, bpp) = aligned_packing_vec::<K, C::A>(m, k, n, cmc, ckc, cnc, num_threads);
 	debug_assert_eq!(bpp as usize % align_of::<K::T>(), 0);
 
 	// LOOP 5: split n into nc parts
@@ -399,9 +387,9 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 				for cpu_id in 0..num_threads {
 					let p = Ptrs::<K::T> {
 						app: app_base.offset(app_stride * cpu_id as isize),
-						bpp: bpp,
-						a: a,
-						c: c,
+						bpp,
+						a,
+						c,
 						loop_counter: &loop_counter as *const _,
 						sync: &sync as *const _,
 					};
@@ -418,8 +406,9 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 						let mxcsr = set_ftz_and_daz();
 						// LOOP 3: split m into mc parts
 						for (l3, mc) in range_chunk(m, cmc) {
-							
-							if l3 < next_id {continue;}
+							if l3 < next_id {
+								continue;
+							}
 
 							dprint!("LOOP 3, {}, mc={}, id={}", l3, mc);
 							let a = a.stride_offset(rsa, cmc * l3);
@@ -429,25 +418,23 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 							pack::<K::T, K::MR>(kc, mc, kmr, app, a, rsa, csa);
 
 							// First time writing to C, use user's `beta`, else accumulate
-							let betap = if l4 == 0 {beta} else {K::T::one()};
+							let betap = if l4 == 0 { beta } else { K::T::one() };
 
 							// LOOP 2 and 1
 							gemm_packed::<K>(nc, kc, mc, alpha, app, bpp, betap, c, rsc, csc);
 
 							next_id = (*p.loop_counter).fetch_add(1, Ordering::Relaxed);
 						}
-						
+
 						let x = thread_counter.fetch_sub(1, Ordering::AcqRel);
 						if x == 1 {
 							{
-								//*lock.lock().unwrap() = true;
 								*lock.lock() = true;
 							}
 							cvar.notify_all();
 						}
 						reset_ftz_and_daz(mxcsr);
 					});
-				  
 				}
 
 				let (ref lock, ref cvar, ref thread_counter) = sync;
@@ -462,7 +449,6 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 				let app = app_base;
 				let mxcsr = set_ftz_and_daz();
 				for (l3, mc) in range_chunk(m, cmc) {
-
 					dprint!("LOOP 3, {}, mc={}", l3, mc);
 					let a = a.stride_offset(rsa, cmc * l3);
 					let c = c.stride_offset(rsc, cmc * l3);
@@ -471,14 +457,13 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 					pack::<K::T, K::MR>(kc, mc, kmr, app, a, rsa, csa);
 
 					// First time writing to C, use user's `beta`, else accumulate
-					let betap = if l4 == 0 {beta} else {<K::T>::one()};
+					let betap = if l4 == 0 { beta } else { <K::T>::one() };
 
 					// LOOP 2 and 1
 					gemm_packed::<K>(nc, kc, mc, alpha, app, bpp, betap, c, rsc, csc);
 				}
 				reset_ftz_and_daz(mxcsr);
 			}
-
 		}
 	}
 }
@@ -490,17 +475,19 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(m: usize,
 /// + nc: columns of packed B
 /// + kc: columns of packed A / rows of packed B
 /// + mc: rows of packed A
-unsafe fn gemm_packed<K: KernelConfig>(nc: usize,
-						 kc: usize,
-						 mc: usize,
-						 alpha: K::T,
-						 app: *const K::T,
-						 bpp: *const K::T,
-						 beta: K::T,
-						 c: *mut K::T,
-						 rsc: isize,
-						 csc: isize)
-{
+#[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
+unsafe fn gemm_packed<K: KernelConfig>(
+	nc: usize,
+	kc: usize,
+	mc: usize,
+	alpha: K::T,
+	app: *const K::T,
+	bpp: *const K::T,
+	beta: K::T,
+	c: *mut K::T,
+	rsc: isize,
+	csc: isize,
+) {
 	let mr = K::MR::to_usize();
 	let nr = K::NR::to_usize();
 
@@ -531,13 +518,7 @@ unsafe fn gemm_packed<K: KernelConfig>(nc: usize,
 	}
 }
 
-unsafe fn scale_block<T: Element>(beta: T,
-									 rows: usize,
-									 cols: usize,
-									 c: *mut T,
-									 rsc: isize,
-									 csc: isize) {
-
+unsafe fn scale_block<T: Element>(beta: T, rows: usize, cols: usize, c: *mut T, rsc: isize, csc: isize) {
 	if rsc == 1 {
 		for col in 0..cols {
 			for row in 0..rows {
@@ -562,12 +543,7 @@ unsafe fn scale_block<T: Element>(beta: T,
 	}
 }
 
-unsafe fn zero_block<T: Element>(rows: usize,
-									cols: usize,
-									c: *mut T,
-									rsc: isize,
-									csc: isize) {
-
+unsafe fn zero_block<T: Element>(rows: usize, cols: usize, c: *mut T, rsc: isize, csc: isize) {
 	if rsc == 1 {
 		for col in 0..cols {
 			for row in 0..rows {
@@ -601,7 +577,15 @@ unsafe fn zero_block<T: Element>(rows: usize,
 ///
 /// Returns an uninitialised packing vector, stride between of each app region, aligned pointer to start of first app, and aligned pointer to start of b
 #[inline(always)]
-unsafe fn aligned_packing_vec<K: KernelConfig, A: Unsigned>(m: usize, k: usize, n: usize, cmc: usize, ckc: usize, cnc: usize, num_a: usize) -> (SmallVec<[K::T; 128]>, isize, *mut K::T, *mut K::T){
+unsafe fn aligned_packing_vec<K: KernelConfig, A: Unsigned>(
+	m: usize,
+	k: usize,
+	n: usize,
+	cmc: usize,
+	ckc: usize,
+	cnc: usize,
+	num_a: usize,
+) -> (SmallVec<[K::T; 128]>, isize, *mut K::T, *mut K::T) {
 	let m = min(m, cmc);
 	let k = min(k, ckc);
 	let n = min(n, cnc);
@@ -609,47 +593,50 @@ unsafe fn aligned_packing_vec<K: KernelConfig, A: Unsigned>(m: usize, k: usize, 
 	let align = A::to_usize();
 	// round up k, n to multiples of mr, nr
 	// round up to multiple of kc
-	
+
 	assert!(align % size_of::<K::T>() == 0); // size_of is size + alignment padding
-	//assert!(align % align_of::<K::T>() == 0);
-	
+										 //assert!(align % align_of::<K::T>() == 0);
+
 	let align_elems = align / size_of::<K::T>();
 
 	let apack_size = k * round_up_to(m, K::MR::to_usize());
 	let bpack_size = k * round_up_to(n, K::NR::to_usize());
 
 	let padding_bytes1 = align_elems; // give room to let first A~ be aligned
-	let padding_bytes2 = if align_elems == 0 {0} else {round_up_to(apack_size, align_elems) - apack_size}; // room after each A~ to keep next section aligned
+	let padding_bytes2 = if align_elems == 0 {
+		0
+	} else {
+		round_up_to(apack_size, align_elems) - apack_size
+	}; // room after each A~ to keep next section aligned
 	let nelem = padding_bytes1 + (apack_size + padding_bytes2) * num_a + bpack_size;
-	
+
 	let mut v = SmallVec::with_capacity(nelem);
 	v.set_len(nelem);
-	
-	
-	dprint!("packed nelem={}, apack={}, bpack={},
-			 m={} k={} n={}",
-			nelem,
-			apack_size,
-			bpack_size,
-			m,
-			k,
-			n);
 
-	
+	dprint!(
+		"packed nelem={}, apack={}, bpack={},
+			 m={} k={} n={}",
+		nelem,
+		apack_size,
+		bpack_size,
+		m,
+		k,
+		n
+	);
+
 	let mut a_ptr: *mut K::T = v.as_mut_ptr();
 	if align != 0 {
 		let current_misalignment = a_ptr as usize % align;
 		debug_assert!(current_misalignment % size_of::<K::T>() == 0); // check that a whole number of elements are required to re-align the pointer
 		if current_misalignment != 0 {
-			a_ptr = a_ptr.offset(((align - current_misalignment) / size_of::<K::T>()) as isize);
+			a_ptr = a_ptr.add((align - current_misalignment) / size_of::<K::T>());
 		}
 	}
-	
-	let b_ptr = a_ptr.offset(((apack_size + padding_bytes2)*num_a) as isize);
-	
+
+	let b_ptr = a_ptr.add((apack_size + padding_bytes2) * num_a);
+
 	(v, (apack_size + padding_bytes2) as isize, a_ptr, b_ptr)
 }
-
 
 /// Pack matrix into `pack`
 /// Variable notation refers to packing ~A. for ~B mr = NR::to_usize
@@ -660,17 +647,17 @@ unsafe fn aligned_packing_vec<K: KernelConfig, A: Unsigned>(m: usize, k: usize, 
 /// + rsa: row stride
 /// + csa: column stride
 /// + zero: zero element to pad with
-unsafe fn pack<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
-				  mc: usize,
-				  mr: usize,
-				  pack: *mut T,
-				  a: *const T,
-				  rsa: isize,
-				  csa: isize)
-{
-	
+unsafe fn pack<T: Element, MR: Loop + ArrayLength<T>>(
+	kc: usize,
+	mc: usize,
+	mr: usize,
+	pack: *mut T,
+	a: *const T,
+	rsa: isize,
+	csa: isize,
+) {
 	debug_assert_eq!(mr, MR::to_usize());
-	
+
 	if csa == 1 {
 		part_pack_row_major::<T, MR>(kc, mc, mr, pack, a, rsa, csa);
 	} else if rsa == 1 {
@@ -688,7 +675,7 @@ unsafe fn pack<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 /// Pack matrix into `pack`
 /// Only packs whole micro panels, and must only be called when csa == 1 (row_major format)
 /// Variable notation refers to packing ~A. for ~B mr = NR::to_usize
-/// 
+///
 /// + kc: length of the micropanel
 /// + mc: number of rows/columns in the matrix to be packed
 /// + mr: kernel rows/columns that we round up to
@@ -696,15 +683,15 @@ unsafe fn pack<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 /// + csa: column stride
 /// + zero: zero element to pad with
 #[inline(never)]
-unsafe fn part_pack_row_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
-				  mc: usize,
-				  mr: usize,
-				  pack: *mut T,
-				  a: *const T,
-				  rsa: isize,
-				  csa: isize)
-{
-	
+unsafe fn part_pack_row_major<T: Element, MR: Loop + ArrayLength<T>>(
+	kc: usize,
+	mc: usize,
+	mr: usize,
+	pack: *mut T,
+	a: *const T,
+	rsa: isize,
+	csa: isize,
+) {
 	debug_assert_eq!(mr, MR::to_usize());
 	debug_assert_eq!(csa, 1);
 	let csa = 1isize;
@@ -712,16 +699,15 @@ unsafe fn part_pack_row_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 
 	//U4::partial_unroll(mc / mr, &mut |ir, _|{
 	for ir in 0..mc / mr {
-
 		let a = a.offset((ir * mr) as isize * rsa);
-		let pack = pack.offset((ir * mr * kc) as isize);
+		let pack = pack.add(ir * mr * kc);
 
 		// prefetch the rows of a for the panel ahead of the current one,
 		// but only once we are a finite number of elements away from the next panel
-		let kc_prefetch = kc.saturating_sub(128/mr); // 64 and 128 seem to work well on sandybridge
+		let kc_prefetch = kc.saturating_sub(128 / mr); // 64 and 128 seem to work well on sandybridge
 
 		//U4::partial_unroll(kc_prefetch, &mut |j, _|{
-		for j in 0..kc_prefetch{
+		for j in 0..kc_prefetch {
 			let a = a.stride_offset(csa, j);
 			// MR::full_unroll(&mut |i|{
 			// 	*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i);
@@ -731,21 +717,20 @@ unsafe fn part_pack_row_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 			// }
 
 			let mut arr = <GA<T, MR>>::default();
-			MR::full_unroll(&mut |i|{
+			MR::full_unroll(&mut |i| {
 				arr[i] = *a.stride_offset(rsa, i);
 			});
-			MR::full_unroll(&mut |i|{
-				*(pack.offset((j*mr+i)as isize)) = arr[i];
+			MR::full_unroll(&mut |i| {
+				*pack.add(j * mr + i) = arr[i];
 			});
 		}
 		//});
 
-		MR::full_unroll(&mut |i|{
-			prefetch(a.offset(((ir+1) * mr + i) as isize * rsa) as *mut i8, 0, 3, 1);
+		MR::full_unroll(&mut |i| {
+			prefetch_read(a.offset(((ir + 1) * mr + i) as isize * rsa) as *mut i8);
 		});
 
-		for j in kc_prefetch..kc{
-			
+		for j in kc_prefetch..kc {
 			let a = a.stride_offset(csa, j);
 			// MR::full_unroll(&mut |i|{
 			// 	*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i);
@@ -755,11 +740,11 @@ unsafe fn part_pack_row_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 			// }
 
 			let mut arr = <GA<T, MR>>::default();
-			MR::full_unroll(&mut |i|{
+			MR::full_unroll(&mut |i| {
 				arr[i] = *a.stride_offset(rsa, i);
 			});
-			MR::full_unroll(&mut |i|{
-				*(pack.offset((j*mr+i)as isize)) = arr[i];
+			MR::full_unroll(&mut |i| {
+				*pack.add(j * mr + i) = arr[i];
 			});
 		}
 	}
@@ -776,14 +761,15 @@ unsafe fn part_pack_row_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 /// + rsa: row stride
 /// + csa: column stride
 #[inline(never)]
-unsafe fn part_pack_col_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
-				  mc: usize,
-				  mr: usize,
-				  pack: *mut T,
-				  a: *const T,
-				  rsa: isize,
-				  csa: isize)
-{
+unsafe fn part_pack_col_major<T: Element, MR: Loop + ArrayLength<T>>(
+	kc: usize,
+	mc: usize,
+	mr: usize,
+	pack: *mut T,
+	a: *const T,
+	rsa: isize,
+	csa: isize,
+) {
 	debug_assert_eq!(mr, MR::to_usize());
 	debug_assert_eq!(rsa, 1);
 	let rsa = 1isize;
@@ -792,24 +778,24 @@ unsafe fn part_pack_col_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 	//U4::partial_unroll(mc / mr, &mut |ir, _|{
 	for ir in 0..mc / mr {
 		let a = a.offset((ir * mr) as isize * rsa);
-		let pack = pack.offset((ir * mr * kc) as isize);
-		prefetch(a.offset(((ir+1) * mr) as isize * rsa) as *mut i8, 0, 3, 1);
-		
+		let pack = pack.add(ir * mr * kc);
+		prefetch_read(a.offset(((ir + 1) * mr) as isize * rsa) as *mut i8);
+
 		//U4::partial_unroll(kc, &mut |j, _|{
-		for j in 0..kc{
-			prefetch(a.stride_offset(csa, j+64/mr) as *mut i8, 0, 3, 1);
+		for j in 0..kc {
+			prefetch_read(a.stride_offset(csa, j + 64 / mr) as *mut i8);
 
 			let mut arr = <GA<T, MR>>::default();
 			let a = a.stride_offset(csa, j);
-			MR::full_unroll(&mut |i|{
+			MR::full_unroll(&mut |i| {
 				arr[i] = *a.stride_offset(rsa, i);
 			});
 			// for i in 0..MR::to_usize() {
 			// 	arr[i] = *a.stride_offset(rsa, i);
 			// }
 
-			MR::full_unroll(&mut |i|{
-				*(pack.offset((j*mr+i)as isize)) = arr[i];
+			MR::full_unroll(&mut |i| {
+				*pack.add(j * mr + i) = arr[i];
 			});
 			// for i in 0..MR::to_usize() {
 			// 	*(pack.offset((j*mr+i)as isize)) = arr[i];
@@ -830,24 +816,24 @@ unsafe fn part_pack_col_major<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 /// + rsa: row stride
 /// + csa: column stride
 #[inline(never)]
-unsafe fn part_pack_strided<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
-				  mc: usize,
-				  mr: usize,
-				  pack: *mut T,
-				  a: *const T,
-				  rsa: isize,
-				  csa: isize)
-{
-	
+unsafe fn part_pack_strided<T: Element, MR: Loop + ArrayLength<T>>(
+	kc: usize,
+	mc: usize,
+	mr: usize,
+	pack: *mut T,
+	a: *const T,
+	rsa: isize,
+	csa: isize,
+) {
 	debug_assert_eq!(mr, MR::to_usize());
 	let mr = MR::to_usize();
 
 	for ir in 0..mc / mr {
 		let a = a.offset((ir * mr) as isize * rsa);
-		let pack = pack.offset((ir * mr * kc) as isize);
-		for j in 0..kc{
-			MR::full_unroll(&mut |i|{
-				*(pack.offset((j*mr+i) as isize)) = *a.stride_offset(rsa, i).stride_offset(csa, j);
+		let pack = pack.add(ir * mr * kc);
+		for j in 0..kc {
+			MR::full_unroll(&mut |i| {
+				*pack.add(j * mr + i) = *a.stride_offset(rsa, i).stride_offset(csa, j);
 			});
 			// for i in 0..MR::to_usize() {
 			// 	*(pack.offset((j*mr+i)as isize)) = *a.stride_offset(rsa, i).stride_offset(csa, j);
@@ -865,24 +851,26 @@ unsafe fn part_pack_strided<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
 /// + mr: kernel rows/columns that we round up to
 /// + rsa: row stride
 /// + csa: column stride
-unsafe fn part_pack_end<T: Element, MR: Loop + ArrayLength<T>>(kc: usize,
-				  mc: usize,
-				  mr: usize,
-				  pack: *mut T,
-				  a: *const T,
-				  rsa: isize,
-				  csa: isize,
-				  rest: usize)
-{
+#[allow(clippy::too_many_arguments)]
+unsafe fn part_pack_end<T: Element, MR: Loop + ArrayLength<T>>(
+	kc: usize,
+	mc: usize,
+	mr: usize,
+	pack: *mut T,
+	a: *const T,
+	rsa: isize,
+	csa: isize,
+	rest: usize,
+) {
 	debug_assert_eq!(mr, MR::to_usize());
 	let mr = MR::to_usize();
 
-	let mut pack = pack.offset(((mc/mr)*mr*kc) as isize);
+	let mut pack = pack.add((mc / mr) * mr * kc);
 
 	// Pad with zeros to multiple of kernel size (uneven mc)
-	let row_offset = mc - rest;//(mc / mr) * mr;
+	let row_offset = mc - rest; //(mc / mr) * mr;
 	for j in 0..kc {
-		MR::full_unroll(&mut |i|{
+		MR::full_unroll(&mut |i| {
 			if i < rest {
 				*pack = *a.stride_offset(rsa, i + row_offset).stride_offset(csa, j);
 			} else {

@@ -7,7 +7,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-
+use generic_array::{ArrayLength, GenericArray};
 /// IMPLEMENTED
 /// sandybridge    - Select the sandybridge processor.
 /// genericsse2    - For older CPUs
@@ -83,19 +83,15 @@
 /// x86-64         - Select the x86-64 processor.
 /// yonah          - Select the yonah processor.
 /// znver1         - Select the znver1 processor.
-
-
 use num_traits::float::Float;
 use std::cmp;
 use std::ops::AddAssign;
 use typenum::*;
 use typenum_loops::Loop;
-use generic_array::{GenericArray, ArrayLength};
 
 pub type GA<T, U> = GenericArray<T, U>;
 
 pub trait KernelConfig: 'static {
-
 	/// Matrix element: [f32|f64]
 	type T: Element;
 	/// Number of registers used in kernel
@@ -143,31 +139,31 @@ pub trait CacheConfigValues: 'static {
 	type KC: Unsigned;
 }
 
-pub trait CacheConfig<K: KernelConfig>: CacheConfigValues{
-	fn alignment() -> usize{
+pub trait CacheConfig<K: KernelConfig>: CacheConfigValues {
+	fn alignment() -> usize {
 		Self::A::to_usize()
 	}
-	fn multithread_factor() -> usize{
+	fn multithread_factor() -> usize {
 		Self::MT::to_usize()
 	}
-	fn mc() -> usize{
-		cmp::max(1, Self::MC::to_usize()/K::MR::to_usize()) * K::MR::to_usize()
+	fn mc() -> usize {
+		cmp::max(1, Self::MC::to_usize() / K::MR::to_usize()) * K::MR::to_usize()
 	}
-	fn nc() -> usize{
-		cmp::max(1, Self::NC::to_usize()/K::NR::to_usize()) * K::NR::to_usize()
+	fn nc() -> usize {
+		cmp::max(1, Self::NC::to_usize() / K::NR::to_usize()) * K::NR::to_usize()
 	}
-	fn kc() -> usize{
+	fn kc() -> usize {
 		Self::KC::to_usize()
 	}
 }
 
-impl<T: CacheConfigValues, K: KernelConfig> CacheConfig<K> for T{}
+impl<T: CacheConfigValues, K: KernelConfig> CacheConfig<K> for T {}
 
 pub trait Element: Copy + Send + Default + Float + AddAssign {}
 impl<T: Copy + Send + Default + Float + AddAssign> Element for T {}
 
 pub struct SgemmCache;
-impl CacheConfigValues for SgemmCache{
+impl CacheConfigValues for SgemmCache {
 	type A = U64;
 	type MT = U128;
 	type MC = U64;
@@ -176,7 +172,7 @@ impl CacheConfigValues for SgemmCache{
 }
 
 pub struct DgemmCache;
-impl CacheConfigValues for DgemmCache{
+impl CacheConfigValues for DgemmCache {
 	type A = U64;
 	type MT = U128;
 	type MC = U32;
