@@ -346,7 +346,10 @@ pub unsafe fn gemm_loop<C: CacheConfig<K>, K: KernelConfig>(
 	// must be able to achieve alignment using only elementwise offsets
 	// size_of returns size + alignment padding.
 	assert!(C::alignment() % size_of::<K::T>() == 0);
-	let (_vec, app_stride, app_base, bpp) = aligned_packing_vec::<K, C::A>(m, k, n, cmc, ckc, cnc, num_threads);
+	let (mut vec, app_stride, a_offset, b_offset) = aligned_packing_vec::<K, C::A>(m, k, n, cmc, ckc, cnc, num_threads);
+	let ptr = vec.as_mut_ptr();
+	let app_base = ptr.add(a_offset);
+	let bpp = ptr.add(b_offset);
 	debug_assert_eq!(bpp as usize % align_of::<K::T>(), 0);
 
 	// LOOP 5: split n into nc parts
@@ -585,7 +588,7 @@ unsafe fn aligned_packing_vec<K: KernelConfig, A: Unsigned>(
 	ckc: usize,
 	cnc: usize,
 	num_a: usize,
-) -> (SmallVec<[K::T; 128]>, isize, *mut K::T, *mut K::T) {
+) -> (SmallVec<[K::T; 128]>, isize, usize, usize) {
 	let m = min(m, cmc);
 	let k = min(k, ckc);
 	let n = min(n, cnc);
@@ -624,18 +627,18 @@ unsafe fn aligned_packing_vec<K: KernelConfig, A: Unsigned>(
 		n
 	);
 
-	let mut a_ptr: *mut K::T = v.as_mut_ptr();
+	let mut a_offset = 0;
 	if align != 0 {
-		let current_misalignment = a_ptr as usize % align;
+		let current_misalignment = v.as_ptr() as usize % align;
 		debug_assert!(current_misalignment % size_of::<K::T>() == 0); // check that a whole number of elements are required to re-align the pointer
 		if current_misalignment != 0 {
-			a_ptr = a_ptr.add((align - current_misalignment) / size_of::<K::T>());
+			a_offset = (align - current_misalignment) / size_of::<K::T>();
 		}
 	}
 
-	let b_ptr = a_ptr.add((apack_size + padding_bytes2) * num_a);
+	let b_offset = a_offset + (apack_size + padding_bytes2) * num_a;
 
-	(v, (apack_size + padding_bytes2) as isize, a_ptr, b_ptr)
+	(v, (apack_size + padding_bytes2) as isize, a_offset, b_offset)
 }
 
 /// Pack matrix into `pack`
